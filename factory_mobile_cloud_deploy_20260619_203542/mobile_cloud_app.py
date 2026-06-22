@@ -19,7 +19,11 @@ from mobile_cloud_config import (
     validate_mobile_cloud_settings,
 )
 from i18n import t
-from ui_theme import inject_shared_theme
+try:
+    from ui_theme import inject_shared_theme
+except ModuleNotFoundError:
+    def inject_shared_theme(mobile: bool = False) -> None:
+        return None
 
 
 st.set_page_config(

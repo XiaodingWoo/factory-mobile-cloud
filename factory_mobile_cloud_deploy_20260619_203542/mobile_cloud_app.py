@@ -18,12 +18,32 @@ from mobile_cloud_config import (
     mobile_cloud_client,
     validate_mobile_cloud_settings,
 )
-from i18n import current_lang, t
+import i18n as _i18n
 try:
     from ui_theme import inject_shared_theme
 except ModuleNotFoundError:
     def inject_shared_theme(mobile: bool = False) -> None:
         return None
+
+t = _i18n.t
+
+
+def current_lang(default: str = "en") -> str:
+    if hasattr(_i18n, "current_lang"):
+        return _i18n.current_lang(default)
+    translations = getattr(_i18n, "TRANSLATIONS", {"en": {}})
+    try:
+        query_lang = str(st.query_params.get("lang", "") or "").strip()
+    except Exception:
+        query_lang = ""
+    if query_lang in translations:
+        st.session_state["language"] = query_lang
+        return query_lang
+    session_lang = str(st.session_state.get("language", "")).strip()
+    if session_lang in translations:
+        return session_lang
+    st.session_state["language"] = default
+    return default
 
 
 st.set_page_config(

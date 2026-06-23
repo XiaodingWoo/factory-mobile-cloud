@@ -17,6 +17,7 @@ TRANSLATIONS = {
         "navigation.machine": "Machines",
         "navigation.production": "Production",
         "navigation.stock": "Inventory",
+        "navigation.loose_goods": "Loose Goods",
         "navigation.moulds": "Moulds",
         "navigation.links": "Product-Mould Links",
         "navigation.history": "History",
@@ -26,6 +27,10 @@ TRANSLATIONS = {
         "stock.product": "Production item",
         "stock.full_pallet": "Add 1 Full Pallet",
         "stock.custom": "Custom Quantity",
+        "stock.custom_quantity": "Custom Quantity",
+        "stock.request_type": "Request type",
+        "stock.waiting_wrap": "Waiting for Wrap",
+        "stock.waiting_handle": "Waiting for Handle",
         "stock.no_items": "No Running or Queued production items are available for this machine.",
         "stock.pallet_missing": "This product has no valid pallet quantity.",
         "stock.submit": "Submit Request",
@@ -83,6 +88,18 @@ TRANSLATIONS = {
         "stock.operator_required": "Operator name is required.",
         "stock.failed": "Request failed. Check the network or contact the supervisor.",
         "stock.received": "This request was already received and will not be duplicated.",
+        "loose.title": "Loose Goods",
+        "loose.status": "Loose status",
+        "loose.quantity": "Loose quantity",
+        "loose.create": "Create loose goods record",
+        "loose.history": "Loose Goods History",
+        "loose.waiting_wrap": "Waiting for Wrap",
+        "loose.waiting_handle": "Waiting for Handle",
+        "history.stock_in": "Stock-In History",
+        "history.loose_goods": "Loose Goods History",
+        "history.show_last": "Show last N records",
+        "history.page_offset": "Page offset",
+        "history.search": "Search history",
         "moulds.title": "Moulds",
         "moulds.search": "Search mould number",
         "moulds.all": "All",
@@ -130,6 +147,7 @@ TRANSLATIONS = {
         "navigation.machine": "机器",
         "navigation.production": "生产",
         "navigation.stock": "库存",
+        "navigation.loose_goods": "散货",
         "navigation.moulds": "模具",
         "navigation.links": "产品—模具挂钩",
         "navigation.history": "历史记录",
@@ -139,6 +157,10 @@ TRANSLATIONS = {
         "stock.product": "生产项目",
         "stock.full_pallet": "增加一整托",
         "stock.custom": "自定义数量",
+        "stock.custom_quantity": "自定义入库",
+        "stock.request_type": "操作类型",
+        "stock.waiting_wrap": "等待缠绕",
+        "stock.waiting_handle": "等安装把手",
         "stock.no_items": "这台机器没有运行中或队列中的生产项目。",
         "stock.pallet_missing": "该产品尚未设置有效的整托数量。",
         "stock.submit": "提交申请",
@@ -196,6 +218,18 @@ TRANSLATIONS = {
         "stock.operator_required": "必须填写操作员姓名。",
         "stock.failed": "提交失败，请检查网络或联系主管。",
         "stock.received": "该申请已经收到，不会重复入库。",
+        "loose.title": "散货",
+        "loose.status": "散货状态",
+        "loose.quantity": "散货数量",
+        "loose.create": "创建散货记录",
+        "loose.history": "散货历史",
+        "loose.waiting_wrap": "等待缠绕",
+        "loose.waiting_handle": "等安装把手",
+        "history.stock_in": "入库历史",
+        "history.loose_goods": "散货历史",
+        "history.show_last": "显示最近 N 条",
+        "history.page_offset": "历史回溯页",
+        "history.search": "搜索历史",
         "moulds.title": "模具",
         "moulds.search": "搜索模具编号",
         "moulds.all": "全部",
@@ -233,8 +267,30 @@ TRANSLATIONS = {
 }
 
 
+def _query_value(name: str, default: str = "") -> str:
+    try:
+        value = st.query_params.get(name, default)
+    except Exception:
+        return default
+    if isinstance(value, list):
+        return str(value[0] if value else default)
+    return str(value or default)
+
+
+def current_lang(default: str = "en") -> str:
+    query_lang = _query_value("lang", "").strip()
+    if query_lang in TRANSLATIONS:
+        st.session_state["language"] = query_lang
+        return query_lang
+    session_lang = str(st.session_state.get("language", "")).strip()
+    if session_lang in TRANSLATIONS:
+        return session_lang
+    st.session_state["language"] = default
+    return default
+
+
 def language() -> str:
-    return str(st.session_state.get("language", "en"))
+    return current_lang()
 
 
 def t(key: str, **values: object) -> str:
@@ -256,4 +312,8 @@ def language_selector(key: str = "language_selector") -> str:
     )
     chosen = labels[selected]
     st.session_state["language"] = chosen
+    try:
+        st.query_params["lang"] = chosen
+    except Exception:
+        pass
     return chosen

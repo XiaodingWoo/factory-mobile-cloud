@@ -18,7 +18,7 @@ from mobile_cloud_config import (
     mobile_cloud_client,
     validate_mobile_cloud_settings,
 )
-from i18n import t
+from i18n import current_lang, t
 try:
     from ui_theme import inject_shared_theme
 except ModuleNotFoundError:
@@ -293,31 +293,30 @@ def inject_css() -> None:
             color: #9a3412;
             font-weight: 750;
         }
-        .language-choice-grid {
+        .language-link-bar {
             display: grid;
-            grid-template-columns: 1fr;
-            gap: 0.75rem;
-            margin-top: 1rem;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.5rem;
+            margin: 0 0 0.75rem;
         }
-        .language-choice-card {
-            display: block;
-            min-height: 72px;
-            padding: 1rem;
-            text-align: center;
-            text-decoration: none;
-            background: #ffffff;
+        .language-link {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+            padding: 0.55rem 0.5rem;
+            border-radius: 10px;
             border: 1px solid #d9dee7;
-            border-radius: 12px;
-            color: #111827;
-            font-size: 1.12rem;
-            font-weight: 850;
+            background: #ffffff;
+            color: #374151;
+            font-size: 1rem;
+            font-weight: 800;
+            text-decoration: none;
         }
-        .language-choice-card small {
-            display: block;
-            margin-top: 0.22rem;
-            color: #6b7280;
-            font-size: 0.88rem;
-            font-weight: 700;
+        .language-link.active {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: #ffffff;
         }
         @media (max-width: 360px) {
             .block-container { padding-left: 10px; padding-right: 10px; }
@@ -346,44 +345,49 @@ def normalize_mobile_page(page: str) -> str:
     return str(page or "stock_in").strip() or "stock_in"
 
 
+def url_with_lang(page: str, **params: object) -> str:
+    payload = {"page": normalize_mobile_page(page), "lang": current_lang()}
+    for key, value in params.items():
+        if value is not None and str(value) != "":
+            payload[key] = value
+    return f"?{urlencode(payload)}"
+
+
+def current_query_payload() -> dict[str, str]:
+    payload: dict[str, str] = {}
+    try:
+        items = st.query_params.items()
+    except Exception:
+        items = []
+    for key, value in items:
+        if isinstance(value, list):
+            value = value[0] if value else ""
+        text = str(value or "").strip()
+        if text:
+            payload[str(key)] = text
+    payload["page"] = normalize_mobile_page(payload.get("page", query_value("page", "stock_in")))
+    return payload
+
+
+def language_url(lang: str) -> str:
+    payload = current_query_payload()
+    payload["lang"] = lang
+    return f"?{urlencode(payload)}"
+
+
 def mobile_language_bar() -> None:
-    current = str(st.session_state.get("language", "en"))
-    left, right = st.columns(2)
-    with left:
-        if st.button(
-            "English" + (" ✓" if current == "en" else ""),
-            key="mobile_language_en",
-            use_container_width=True,
-        ):
-            st.session_state["language"] = "en"
-            st.session_state["machine_language_confirmed"] = True
-            st.rerun()
-    with right:
-        if st.button(
-            "中文" + (" ✓" if current == "zh-CN" else ""),
-            key="mobile_language_zh",
-            use_container_width=True,
-        ):
-            st.session_state["language"] = "zh-CN"
-            st.session_state["machine_language_confirmed"] = True
-            st.rerun()
-
-
-def machine_language_gate() -> bool:
-    if st.session_state.get("machine_language_confirmed"):
-        return True
-    st.title("Choose Language / 选择语言")
-    st.caption("Use the English / 中文 buttons above before opening Machine Status.")
+    current = current_lang()
+    en_active = " active" if current == "en" else ""
+    zh_active = " active" if current == "zh-CN" else ""
     st.markdown(
-        """
-        <div class="language-choice-grid">
-            <div class="language-choice-card">Machine Status<small>Choose English or Chinese first</small></div>
-            <div class="language-choice-card">机器状态<small>请先选择中文或英文</small></div>
+        f"""
+        <div class="language-link-bar">
+            <a class="language-link{en_active}" href="{escape(language_url("en"))}">English</a>
+            <a class="language-link{zh_active}" href="{escape(language_url("zh-CN"))}">中文</a>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    return False
 
 
 def require_pin(mobile_pin: str) -> bool:
@@ -421,8 +425,9 @@ def load_machines(settings: MobileCloudSettings) -> list[dict]:
     response = (
         client.table("mobile_public_machines")
         .select(
-            "machine_id,running_product,product_code,product_name,planned_qty,completed_qty,"
-            "remaining_qty,status,mould_number,material,colour_masterbatch,notes,updated_at,is_active"
+            "machine_id,machine_name,running_product,product_code,product_name,planned_qty,completed_qty,"
+            "remaining_qty,status,mould_number,material,material_location,colour_masterbatch,"
+            "operator_name,pallet_qty,notes,updated_at,is_active"
         )
         .eq("is_active", True)
         .order("machine_id")
@@ -438,7 +443,8 @@ def load_production_items(settings: MobileCloudSettings) -> list[dict]:
         client.table("mobile_public_production_items")
         .select(
             "schedule_id,machine_id,machine_name,sequence,status,product_code,product_name,"
-            "mould_number,planned_qty,completed_qty,pallet_qty,updated_at,is_active"
+            "mould_number,material,material_location,colour_masterbatch,operator_name,notes,"
+            "planned_qty,completed_qty,pallet_qty,updated_at,is_active"
         )
         .eq("is_active", True)
         .in_("status", ["Running", "Next", "Queued"])
@@ -524,6 +530,8 @@ def show_success_card(summary: dict) -> None:
             <div class="value">{escape(summary.get("product", ""))}</div>
             <div class="label">{escape(t("common.quantity"))}</div>
             <div class="value">{escape(str(summary.get("quantity", "")))}</div>
+            <div class="label">{escape(t("stock.request_type"))}</div>
+            <div class="value">{escape(str(summary.get("request_type", "")))}</div>
             <div class="label">{escape(t("common.operator"))}</div>
             <div class="value">{escape(summary.get("operator", ""))}</div>
             <div class="label">{escape(t("common.submitted_at"))}</div>
@@ -630,7 +638,17 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
     selected_label = st.selectbox(t("stock.product"), list(options))
     selected_product = options[selected_label]
     pallet_qty = valid_pallet_qty(selected_product.get("pallet_qty"))
-    mode = st.radio(t("stock.quantity_mode"), ["full_pallet", "custom"], format_func=lambda value: t("stock.full_pallet") if value == "full_pallet" else t("stock.custom"))
+    mode_options = ["full_pallet", "custom", "waiting_for_wrap", "waiting_for_handle"]
+    mode = st.radio(
+        t("stock.request_type"),
+        mode_options,
+        format_func=lambda value: {
+            "full_pallet": t("stock.full_pallet"),
+            "custom": t("stock.custom_quantity"),
+            "waiting_for_wrap": t("stock.waiting_wrap"),
+            "waiting_for_handle": t("stock.waiting_handle"),
+        }.get(value, value),
+    )
     if mode == "full_pallet":
         if pallet_qty is None:
             st.warning(t("stock.pallet_missing"))
@@ -639,7 +657,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             st.info(f"{t('stock.full_pallet')} · {pallet_qty:,}")
             qty = pallet_qty
     else:
-        qty = st.number_input(t("stock.custom"), min_value=1, step=1, value=1)
+        qty = st.number_input(t("stock.custom_quantity"), min_value=1, step=1, value=1)
     operator_name = st.text_input(t("common.operator"), placeholder=t("common.required"))
     note = st.text_area(t("common.note_optional"))
 
@@ -652,7 +670,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             <div class="value">{escape(selected_label)}</div>
             <div class="label">{escape(t("common.machine"))}</div><div class="value">{escape(machine_id)}</div>
             <div class="label">{escape(t("common.mould"))}</div><div class="value">{escape(str(selected_product.get("mould_number") or "-"))}</div>
-            <div class="label">{escape(t("stock.quantity_mode"))}</div><div class="value">{escape(t("stock.full_pallet") if mode == "full_pallet" else t("stock.custom"))}</div>
+            <div class="label">{escape(t("stock.request_type"))}</div><div class="value">{escape({"full_pallet": t("stock.full_pallet"), "custom": t("stock.custom_quantity"), "waiting_for_wrap": t("stock.waiting_wrap"), "waiting_for_handle": t("stock.waiting_handle")}.get(mode, mode))}</div>
             <div class="label">{escape(t("common.quantity"))}</div>
             <div class="value">{escape(str(qty))}</div>
             <div class="label">{escape(t("common.operator"))}</div>
@@ -684,6 +702,11 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
         client = mobile_cloud_client(settings)
         product_code = str(selected_product.get("product_code") or "").strip()
         product_name = str(selected_product.get("product_name") or "").strip()
+        loose_status = ""
+        if mode == "waiting_for_wrap":
+            loose_status = "WaitingForWrap"
+        elif mode == "waiting_for_handle":
+            loose_status = "WaitingForHandle"
         client.table("stock_in_requests").insert(
             {
                 "client_request_id": request_id,
@@ -695,6 +718,8 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
                 "production_status": normalized_queue_status(selected_product.get("status")),
                 "pallet_qty": pallet_qty,
                 "quantity_mode": mode,
+                "request_type": mode,
+                "loose_status": loose_status or None,
                 "qty": quantity,
                 "operator_name": operator,
                 "note": note.strip() or None,
@@ -707,6 +732,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             "request_id": request_id,
             "product": selected_label,
             "quantity": quantity,
+            "request_type": {"full_pallet": t("stock.full_pallet"), "custom": t("stock.custom_quantity"), "waiting_for_wrap": t("stock.waiting_wrap"), "waiting_for_handle": t("stock.waiting_handle")}.get(mode, mode),
             "operator": operator,
             "submitted_at": now_display(),
             "status": "pending",
@@ -722,6 +748,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
                 "request_id": request_id,
                 "product": selected_label,
                 "quantity": qty,
+                "request_type": {"full_pallet": t("stock.full_pallet"), "custom": t("stock.custom_quantity"), "waiting_for_wrap": t("stock.waiting_wrap"), "waiting_for_handle": t("stock.waiting_handle")}.get(mode, mode),
                 "operator": operator_name.strip(),
                 "submitted_at": now_display(),
                 "status": "pending",
@@ -896,9 +923,9 @@ def machine_button_list(machines: list[dict]) -> None:
             continue
         status = str(machine.get("status") or "No Plan")
         css_class = status_class(status)
-        query = urlencode({"page": "machine_status", "machine_id": machine_id})
+        query = url_with_lang("machine_status", machine_id=machine_id)
         links.append(
-            f'<a class="machine-button {css_class}" href="?{query}">{escape(machine_id)}<small>{escape(status_display(status))}</small></a>'
+            f'<a class="machine-button {css_class}" href="{escape(query)}">{escape(machine_id)}<small>{escape(status_display(status))}</small></a>'
         )
     st.markdown(f'<div class="machine-button-grid">{"".join(links)}</div>', unsafe_allow_html=True)
 
@@ -925,7 +952,7 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         st.error(t("machine.not_found", machine_id=requested_machine_id))
         machine_button_list(machines)
         return
-    st.markdown(f'<a class="machine-button" href="?page=machine_status">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
+    st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
     machine_card(selected[0])
     try:
         production_items = load_production_items(settings)
@@ -960,13 +987,13 @@ def moulds_page(settings: MobileCloudSettings) -> None:
         if issue_only and not str(mould.get("issue_description") or "").strip():
             continue
         number = escape(str(mould.get("mould_number") or "-"))
-        query = urlencode({"page": "mould", "mould_number": mould.get("mould_number")})
+        query = url_with_lang("mould", mould_number=mould.get("mould_number"))
         st.markdown(
             f'<div class="public-card"><div class="machine-id">{number}</div>'
             f'<div class="label">{escape(t("common.location"))}</div><div class="value">{escape(str(mould.get("storage_location") or "-"))}</div>'
             f'<div class="label">{escape(t("common.status"))}</div><div class="value">{escape(str(mould.get("status") or "-"))}</div>'
             f'<div class="label">{escape(t("common.issue"))}</div><div class="value">{escape(str(mould.get("issue_description") or "-"))}</div>'
-            f'<a href="?{query}">{escape(t("moulds.details"))}</a></div>',
+            f'<a href="{escape(query)}">{escape(t("moulds.details"))}</a></div>',
             unsafe_allow_html=True,
         )
 
@@ -1049,8 +1076,6 @@ def main() -> None:
     inject_shared_theme(mobile=True)
     page = normalize_mobile_page(query_value("page", "stock_in"))
     mobile_language_bar()
-    if page == "machine_status" and not machine_language_gate():
-        return
     load_cloud_environment()
     settings = load_mobile_cloud_settings()
     try:

@@ -8,6 +8,7 @@ It only:
 
 - selects `mobile_public_machines`
 - selects active `mobile_public_products`
+- selects active `mobile_public_production_items`
 - inserts pending rows into `stock_in_requests`
 
 The local factory computer remains responsible for publishing snapshots and applying pending Stock-In requests to Excel.
@@ -22,6 +23,14 @@ SUPABASE_ANON_KEY
 MOBILE_PIN
 ```
 
+Optional temporary debugging variable:
+
+```text
+DEBUG_SUPABASE
+```
+
+Set `DEBUG_SUPABASE=1` only while troubleshooting. It shows detailed Supabase exceptions in the Streamlit page. Turn it off for normal production use.
+
 Never configure these in the cloud Mobile App:
 
 ```text
@@ -32,19 +41,22 @@ The service role key remains only in the local factory computer `.env`.
 
 ## Apply the Supabase Migration
 
-Before deploying, run this file once in Supabase SQL Editor:
+Before deploying, run this consolidated file in Supabase SQL Editor:
 
 ```text
-supabase_cloud_snapshot_migration.sql
+supabase_migration_latest.sql
 ```
 
-This expands product codes to `text`, adds the extended machine snapshot fields, enforces `client_request_id` uniqueness, and applies RLS:
+This creates or updates public mobile snapshots, Stock-In request fields, product `pallet_qty`, production item snapshots, mould issue tables, storage upload policy, and RLS policies.
 
 - anon can select active machine snapshots
 - anon can select active products
-- anon can insert pending positive Stock-In requests
+- anon can select active Running/Next/Queued/Planned production items
+- anon can insert pending positive Stock-In and Loose Goods waiting requests
 - anon cannot select Stock-In requests
 - anon cannot update or delete Stock-In requests
+
+If the cloud Machine Status page says `mobile_public_machines is missing columns`, run `supabase_migration_latest.sql`, then reboot the Streamlit app.
 
 ## Option A: Streamlit Community Cloud
 
@@ -65,6 +77,7 @@ mobile_cloud_app.py
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_ANON_KEY = "your-publishable-or-anon-key"
 MOBILE_PIN = "your-mobile-pin"
+# DEBUG_SUPABASE = "1"  # temporary troubleshooting only
 ```
 
 8. Deploy the app.

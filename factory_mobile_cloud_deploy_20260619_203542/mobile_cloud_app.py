@@ -53,7 +53,36 @@ st.set_page_config(
 )
 
 
-CLOUD_ENV_NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "MOBILE_PIN")
+CLOUD_ENV_NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "MOBILE_PIN", "DEBUG_SUPABASE")
+MACHINE_REQUIRED_COLUMNS = [
+    "machine_id",
+    "machine_name",
+    "running_product",
+    "product_code",
+    "product_name",
+    "planned_qty",
+    "completed_qty",
+    "remaining_qty",
+    "status",
+    "mould_number",
+    "material",
+    "material_location",
+    "colour_masterbatch",
+    "operator_name",
+    "pallet_qty",
+    "notes",
+    "updated_at",
+    "is_active",
+]
+
+
+class SupabaseMachineSchemaError(RuntimeError):
+    def __init__(self, missing_columns: list[str]) -> None:
+        self.missing_columns = missing_columns
+        super().__init__(
+            "Supabase table mobile_public_machines is missing columns: "
+            + ", ".join(missing_columns)
+        )
 
 
 def load_cloud_environment() -> None:
@@ -66,6 +95,53 @@ def load_cloud_environment() -> None:
             secret_value = ""
         if secret_value:
             os.environ[name] = str(secret_value)
+
+
+def debug_supabase_enabled() -> bool:
+    value = os.getenv("DEBUG_SUPABASE", "").strip().lower()
+    if not value:
+        try:
+            value = str(st.secrets.get("DEBUG_SUPABASE", "") or "").strip().lower()
+        except Exception:
+            value = ""
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def show_supabase_diagnostic(message: str, exc: Exception) -> None:
+    st.error(message)
+    if debug_supabase_enabled():
+        st.exception(exc)
+    else:
+        st.caption("Enable DEBUG_SUPABASE=1 in Streamlit secrets to show detailed Supabase error details.")
+
+
+def is_missing_column_error(exc: Exception, column: str) -> bool:
+    text = str(exc).casefold()
+    column_text = column.casefold()
+    missing_markers = [
+        "could not find",
+        "schema cache",
+        "does not exist",
+        "unknown column",
+        "column",
+    ]
+    return column_text in text and any(marker in text for marker in missing_markers)
+
+
+@st.cache_data(ttl=300)
+def check_supabase_machine_schema(settings: MobileCloudSettings) -> None:
+    client = mobile_cloud_client(settings)
+    missing: list[str] = []
+    for column in MACHINE_REQUIRED_COLUMNS:
+        try:
+            client.table("mobile_public_machines").select(column).limit(1).execute()
+        except Exception as exc:
+            if is_missing_column_error(exc, column):
+                missing.append(column)
+                continue
+            raise
+    if missing:
+        raise SupabaseMachineSchemaError(missing)
 
 
 def inject_css() -> None:
@@ -161,6 +237,68 @@ def inject_css() -> None:
             border-left-color: #f59e0b;
         }
         .public-card.status-maintenance { border-left-color: #2563eb; }
+        .stock-product-card {
+            background: #ffffff;
+            border: 2px solid #d9dee7;
+            border-radius: 12px;
+            padding: 0.85rem;
+            margin: 0.75rem 0 0.35rem;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+            overflow-wrap: anywhere;
+        }
+        .stock-product-card.selected {
+            border-color: #16a34a;
+            box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.16);
+        }
+        .stock-product-card .product-title {
+            font-size: 1.04rem;
+            font-weight: 850;
+            line-height: 1.24;
+            color: #111827;
+            margin-top: 0.42rem;
+        }
+        .stock-product-card .product-code {
+            color: #4b5563;
+            font-size: 0.92rem;
+            font-weight: 750;
+            margin-top: 0.2rem;
+        }
+        .stock-product-card .selected-flag {
+            display: inline-flex;
+            align-items: center;
+            min-height: 28px;
+            padding: 0.18rem 0.52rem;
+            border-radius: 999px;
+            background: #dcfce7;
+            color: #166534;
+            font-size: 0.84rem;
+            font-weight: 850;
+        }
+        .stock-product-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.45rem;
+            margin-top: 0.65rem;
+        }
+        .stock-product-field {
+            min-width: 0;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 0.48rem;
+            background: #f8fafc;
+        }
+        .stock-product-field .field-label {
+            color: #6b7280;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+        .stock-product-field .field-value {
+            color: #111827;
+            font-size: 0.95rem;
+            font-weight: 850;
+            margin-top: 0.15rem;
+            overflow-wrap: anywhere;
+        }
         .label {
             color: #6b7280;
             font-size: 0.86rem;
@@ -340,7 +478,7 @@ def inject_css() -> None:
         }
         @media (max-width: 360px) {
             .block-container { padding-left: 10px; padding-right: 10px; }
-            .metrics, .machine-button-grid { grid-template-columns: 1fr; }
+            .metrics, .machine-button-grid, .stock-product-grid { grid-template-columns: 1fr; }
             h1 { font-size: 1.38rem !important; }
         }
         </style>
@@ -431,7 +569,7 @@ def load_products(settings: MobileCloudSettings) -> list[dict]:
     client = mobile_cloud_client(settings)
     response = (
         client.table("mobile_public_products")
-        .select("product_code,product_name,label,search_text,is_active")
+        .select("product_code,product_name,label,pallet_qty,search_text,is_active")
         .eq("is_active", True)
         .order("product_name")
         .execute()
@@ -444,11 +582,7 @@ def load_machines(settings: MobileCloudSettings) -> list[dict]:
     client = mobile_cloud_client(settings)
     response = (
         client.table("mobile_public_machines")
-        .select(
-            "machine_id,machine_name,running_product,product_code,product_name,planned_qty,completed_qty,"
-            "remaining_qty,status,mould_number,material,material_location,colour_masterbatch,"
-            "operator_name,pallet_qty,notes,updated_at,is_active"
-        )
+        .select(",".join(MACHINE_REQUIRED_COLUMNS))
         .eq("is_active", True)
         .order("machine_id")
         .execute()
@@ -467,7 +601,7 @@ def load_production_items(settings: MobileCloudSettings) -> list[dict]:
             "planned_qty,completed_qty,pallet_qty,updated_at,is_active"
         )
         .eq("is_active", True)
-        .in_("status", ["Running", "Next", "Queued"])
+        .in_("status", ["Running", "Next", "Queued", "Planned"])
         .order("machine_id")
         .order("sequence")
         .execute()
@@ -486,6 +620,8 @@ def reset_stock_request() -> None:
     st.session_state["stock_client_request_id"] = str(uuid4())
     st.session_state["stock_request_success"] = None
     st.session_state["stock_last_submitted_id"] = ""
+    st.session_state.pop("selected_stock_product_id", None)
+    st.session_state.pop("selected_stock_machine_id", None)
 
 
 def current_request_id() -> str:
@@ -578,7 +714,105 @@ def normalized_queue_status(status: object) -> str:
 
 
 def stock_selectable_status(status: object) -> bool:
-    return normalized_queue_status(status) in {"Running", "Next"}
+    return normalized_queue_status(status) in {"Running", "Next", "Planned"}
+
+
+def number_display(value: object) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return "-"
+    if number.is_integer():
+        return f"{int(number):,}"
+    return f"{number:,.2f}"
+
+
+def item_remaining_qty(item: dict) -> float:
+    try:
+        planned = float(item.get("planned_qty") or 0)
+    except (TypeError, ValueError):
+        planned = 0
+    try:
+        completed = float(item.get("completed_qty") or 0)
+    except (TypeError, ValueError):
+        completed = 0
+    if item.get("remaining_qty") not in {None, ""}:
+        try:
+            return max(float(item.get("remaining_qty") or 0), 0)
+        except (TypeError, ValueError):
+            pass
+    return max(planned - completed, 0)
+
+
+def stock_item_id(item: dict) -> str:
+    schedule_id = str(item.get("schedule_id") or "").strip()
+    if schedule_id:
+        return schedule_id
+    return "|".join(
+        str(item.get(field) or "").strip()
+        for field in ["machine_id", "status", "product_code", "product_name", "mould_number"]
+    )
+
+
+def stock_item_sort_key(item: dict) -> tuple[int, int, str]:
+    status = normalized_queue_status(item.get("status"))
+    status_order = {"Running": 0, "Next": 1, "Planned": 2}.get(status, 3)
+    try:
+        sequence = int(float(item.get("sequence") or 999999))
+    except (TypeError, ValueError):
+        sequence = 999999
+    return (status_order, sequence, str(item.get("product_name") or item.get("product_code") or ""))
+
+
+def product_pallet_lookup(products: list[dict]) -> dict[str, int]:
+    lookup: dict[str, int] = {}
+    for product in products:
+        code = str(product.get("product_code") or "").strip()
+        qty = valid_pallet_qty(product.get("pallet_qty"))
+        if code and qty:
+            lookup[code.casefold()] = qty
+    return lookup
+
+
+def resolved_pallet_qty(item: dict, products_by_code: dict[str, int]) -> int | None:
+    code = str(item.get("product_code") or "").strip().casefold()
+    if code and code in products_by_code:
+        return products_by_code[code]
+    return valid_pallet_qty(item.get("pallet_qty"))
+
+
+def request_type_label(mode: str) -> str:
+    return {
+        "full_pallet": t("stock.full_pallet"),
+        "custom": t("stock.custom_quantity"),
+    }.get(mode, mode)
+
+
+def stock_product_card(item: dict, selected: bool, pallet_qty: int | None) -> None:
+    status = normalized_queue_status(item.get("status"))
+    css_class = status_class(status)
+    remaining = item_remaining_qty(item)
+    selected_flag = f'<span class="selected-flag">{escape(t("stock.selected"))}</span>' if selected else ""
+    st.markdown(
+        f"""
+        <div class="stock-product-card {css_class}{' selected' if selected else ''}">
+            {selected_flag}
+            <div class="status-badge {css_class}">{escape(t("stock.product_card_status"))}: {escape(status_display(status))}</div>
+            <div class="product-title">{escape(str(item.get("product_name") or "-"))}</div>
+            <div class="product-code">{escape(str(item.get("product_code") or "-"))}</div>
+            <div class="stock-product-grid">
+                <div class="stock-product-field"><div class="field-label">{escape(t("machine.planned"))}</div><div class="field-value">{escape(number_display(item.get("planned_qty")))}</div></div>
+                <div class="stock-product-field"><div class="field-label">{escape(t("machine.done"))}</div><div class="field-value">{escape(number_display(item.get("completed_qty")))}</div></div>
+                <div class="stock-product-field"><div class="field-label">{escape(t("stock.product_card_remaining"))}</div><div class="field-value">{escape(number_display(remaining))}</div></div>
+                <div class="stock-product-field"><div class="field-label">{escape(t("machine.mould_number"))}</div><div class="field-value">{escape(str(item.get("mould_number") or "-"))}</div></div>
+                <div class="stock-product-field"><div class="field-label">{escape(t("machine.material"))}</div><div class="field-value">{escape(str(item.get("material") or "-"))}</div></div>
+                <div class="stock-product-field"><div class="field-label">{escape(t("machine.colour"))}</div><div class="field-value">{escape(str(item.get("colour_masterbatch") or "-"))}</div></div>
+                <div class="stock-product-field"><div class="field-label">{escape(t("stock.full_pallet_qty"))}</div><div class="field-value">{escape(number_display(pallet_qty) if pallet_qty else "-")}</div></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def production_item_search_text(item: dict) -> str:
@@ -599,9 +833,13 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
     st.title(t("stock.title"))
     try:
         items = load_production_items(settings)
-    except Exception:
-        st.error(t("stock.load_error"))
+    except Exception as exc:
+        show_supabase_diagnostic(t("stock.load_error"), exc)
         return
+    try:
+        products = load_products(settings)
+    except Exception:
+        products = []
     if not items:
         st.warning(t("stock.no_items"))
         return
@@ -638,43 +876,71 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
     if not machine_id:
         st.info(t("stock.choose_machine_hint"))
         return
-    machine_items = [
+    if st.session_state.get("selected_stock_machine_id") != machine_id:
+        st.session_state["selected_stock_machine_id"] = machine_id
+        st.session_state.pop("selected_stock_product_id", None)
+
+    products_by_code = product_pallet_lookup(products)
+    machine_items_all = [
         item
         for item in selectable_items
         if str(item.get("machine_id")) == machine_id and stock_selectable_status(item.get("status"))
     ]
-    if not machine_items:
+    machine_items_all = sorted(machine_items_all, key=stock_item_sort_key)
+    if not machine_items_all:
         st.warning(t("stock.no_machine_products", machine_id=machine_id))
         return
+    st.subheader(t("stock.select_product"))
     product_search = st.text_input(t("stock.search_product"))
-    machine_items = filter_production_items(machine_items, product_search)
+    machine_items = filter_production_items(machine_items_all, product_search)
     if not machine_items:
         st.warning(t("stock.no_machine_products", machine_id=machine_id))
         return
-    options = {
-        f"{status_display(item.get('status'))} | {item.get('product_code')} | {item.get('product_name')} | {t('common.mould')} {item.get('mould_number') or '-'}": item
-        for item in machine_items
-    }
-    selected_label = st.selectbox(t("stock.product"), list(options))
-    selected_product = options[selected_label]
-    pallet_qty = valid_pallet_qty(selected_product.get("pallet_qty"))
-    mode_options = ["full_pallet", "custom", "waiting_for_wrap", "waiting_for_handle"]
+
+    selected_id = str(st.session_state.get("selected_stock_product_id") or "")
+    for section_title, section_items in [
+        (t("stock.running_products"), [item for item in machine_items if normalized_queue_status(item.get("status")) == "Running"]),
+        (t("stock.queued_products"), [item for item in machine_items if normalized_queue_status(item.get("status")) != "Running"]),
+    ]:
+        if not section_items:
+            continue
+        st.markdown(f"**{escape(section_title)}**")
+        for item in section_items:
+            item_id = stock_item_id(item)
+            pallet_for_card = resolved_pallet_qty(item, products_by_code)
+            selected = item_id == selected_id
+            stock_product_card(item, selected, pallet_for_card)
+            button_label = t("stock.selected") if selected else t("stock.select_product")
+            if st.button(button_label, key=f"stock_product_select_{item_id}", type="primary" if selected else "secondary"):
+                st.session_state["selected_stock_product_id"] = item_id
+                st.session_state["selected_stock_machine_id"] = machine_id
+                st.rerun()
+
+    selected_product = next((item for item in machine_items_all if stock_item_id(item) == selected_id), None)
+    if not selected_product:
+        st.info(t("stock.select_product"))
+        return
+
+    selected_label = (
+        f"{status_display(selected_product.get('status'))} | "
+        f"{selected_product.get('product_code')} | {selected_product.get('product_name')}"
+    )
+    pallet_qty = resolved_pallet_qty(selected_product, products_by_code)
+    mode_options = ["full_pallet", "custom"]
     mode = st.radio(
         t("stock.request_type"),
         mode_options,
         format_func=lambda value: {
             "full_pallet": t("stock.full_pallet"),
             "custom": t("stock.custom_quantity"),
-            "waiting_for_wrap": t("stock.waiting_wrap"),
-            "waiting_for_handle": t("stock.waiting_handle"),
         }.get(value, value),
     )
     if mode == "full_pallet":
         if pallet_qty is None:
-            st.warning(t("stock.pallet_missing"))
+            st.error(t("stock.no_pallet_qty"))
             qty = 0
         else:
-            st.info(f"{t('stock.full_pallet')} · {pallet_qty:,}")
+            st.info(f"{t('stock.full_pallet_qty')}: {pallet_qty:,}")
             qty = pallet_qty
     else:
         qty = st.number_input(t("stock.custom_quantity"), min_value=1, step=1, value=1)
@@ -690,7 +956,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             <div class="value">{escape(selected_label)}</div>
             <div class="label">{escape(t("common.machine"))}</div><div class="value">{escape(machine_id)}</div>
             <div class="label">{escape(t("common.mould"))}</div><div class="value">{escape(str(selected_product.get("mould_number") or "-"))}</div>
-            <div class="label">{escape(t("stock.request_type"))}</div><div class="value">{escape({"full_pallet": t("stock.full_pallet"), "custom": t("stock.custom_quantity"), "waiting_for_wrap": t("stock.waiting_wrap"), "waiting_for_handle": t("stock.waiting_handle")}.get(mode, mode))}</div>
+            <div class="label">{escape(t("stock.request_type"))}</div><div class="value">{escape(request_type_label(mode))}</div>
             <div class="label">{escape(t("common.quantity"))}</div>
             <div class="value">{escape(str(qty))}</div>
             <div class="label">{escape(t("common.operator"))}</div>
@@ -703,7 +969,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
     )
 
     st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
-    submitted = st.button(t("stock.submit"), type="primary", disabled=qty <= 0)
+    submitted = st.button(t("stock.submit_request"), type="primary", disabled=qty <= 0)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not submitted:
@@ -722,11 +988,6 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
         client = mobile_cloud_client(settings)
         product_code = str(selected_product.get("product_code") or "").strip()
         product_name = str(selected_product.get("product_name") or "").strip()
-        loose_status = ""
-        if mode == "waiting_for_wrap":
-            loose_status = "WaitingForWrap"
-        elif mode == "waiting_for_handle":
-            loose_status = "WaitingForHandle"
         client.table("stock_in_requests").insert(
             {
                 "client_request_id": request_id,
@@ -738,8 +999,8 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
                 "production_status": normalized_queue_status(selected_product.get("status")),
                 "pallet_qty": pallet_qty,
                 "quantity_mode": mode,
-                "request_type": mode,
-                "loose_status": loose_status or None,
+                "request_type": "stock_in",
+                "loose_status": None,
                 "qty": quantity,
                 "operator_name": operator,
                 "note": note.strip() or None,
@@ -752,7 +1013,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             "request_id": request_id,
             "product": selected_label,
             "quantity": quantity,
-            "request_type": {"full_pallet": t("stock.full_pallet"), "custom": t("stock.custom_quantity"), "waiting_for_wrap": t("stock.waiting_wrap"), "waiting_for_handle": t("stock.waiting_handle")}.get(mode, mode),
+            "request_type": request_type_label(mode),
             "operator": operator,
             "submitted_at": now_display(),
             "status": "pending",
@@ -768,7 +1029,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
                 "request_id": request_id,
                 "product": selected_label,
                 "quantity": qty,
-                "request_type": {"full_pallet": t("stock.full_pallet"), "custom": t("stock.custom_quantity"), "waiting_for_wrap": t("stock.waiting_wrap"), "waiting_for_handle": t("stock.waiting_handle")}.get(mode, mode),
+                "request_type": request_type_label(mode),
                 "operator": operator_name.strip(),
                 "submitted_at": now_display(),
                 "status": "pending",
@@ -953,9 +1214,21 @@ def machine_button_list(machines: list[dict]) -> None:
 def machine_status_page(settings: MobileCloudSettings) -> None:
     st.title(t("machine.title"))
     try:
+        check_supabase_machine_schema(settings)
         machines = load_machines(settings)
-    except Exception:
-        st.error(t("machine.load_error"))
+    except SupabaseMachineSchemaError as exc:
+        st.error(
+            "Supabase table mobile_public_machines is missing columns: "
+            + ", ".join(exc.missing_columns)
+        )
+        st.info("Please run supabase_migration_latest.sql in Supabase SQL Editor, then reboot this Streamlit app.")
+        if debug_supabase_enabled():
+            st.exception(exc)
+        else:
+            st.caption("Enable DEBUG_SUPABASE=1 in Streamlit secrets to show detailed Supabase error details.")
+        return
+    except Exception as exc:
+        show_supabase_diagnostic(t("machine.load_error"), exc)
         return
     if not machines:
         st.warning(t("machine.empty"))

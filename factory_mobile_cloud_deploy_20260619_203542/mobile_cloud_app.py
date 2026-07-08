@@ -4,6 +4,7 @@ import os
 import hashlib
 from datetime import datetime, timezone
 from html import escape
+from textwrap import dedent
 from urllib.parse import urlencode
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -794,7 +795,7 @@ def stock_product_card(item: dict, selected: bool, pallet_qty: int | None) -> No
     remaining = item_remaining_qty(item)
     selected_flag = f'<span class="selected-flag">{escape(t("stock.selected"))}</span>' if selected else ""
     st.markdown(
-        f"""
+        dedent(f"""
         <div class="stock-product-card {css_class}{' selected' if selected else ''}">
             {selected_flag}
             <div class="status-badge {css_class}">{escape(t("stock.product_card_status"))}: {escape(status_display(status))}</div>
@@ -810,7 +811,7 @@ def stock_product_card(item: dict, selected: bool, pallet_qty: int | None) -> No
                 <div class="stock-product-field"><div class="field-label">{escape(t("stock.full_pallet_qty"))}</div><div class="field-value">{escape(number_display(pallet_qty) if pallet_qty else "-")}</div></div>
             </div>
         </div>
-        """,
+        """).strip(),
         unsafe_allow_html=True,
     )
 

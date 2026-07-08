@@ -310,6 +310,65 @@ def inject_css() -> None:
             font-weight: 760;
             overflow-wrap: anywhere;
         }
+        .production-notes-card {
+            margin-top: 0.65rem;
+            border: 1px solid #d8e3f3;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #ffffff;
+        }
+        .production-notes-title {
+            padding: 0.5rem 0.62rem;
+            font-size: 0.92rem;
+            font-weight: 850;
+            color: #1e3a8a;
+            background: #eff6ff;
+            border-bottom: 1px solid #d8e3f3;
+        }
+        .production-notes-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+            font-size: 0.88rem;
+        }
+        .production-notes-table th,
+        .production-notes-table td {
+            border-bottom: 1px solid #e5edf7;
+            padding: 0.45rem 0.5rem;
+            vertical-align: top;
+            overflow-wrap: anywhere;
+        }
+        .production-notes-table tr:last-child th,
+        .production-notes-table tr:last-child td {
+            border-bottom: 0;
+        }
+        .production-notes-group {
+            width: 25%;
+            font-weight: 850;
+            text-align: center;
+        }
+        .production-notes-field {
+            width: 39%;
+            font-weight: 800;
+            color: #1f2937;
+        }
+        .production-notes-value {
+            width: 36%;
+            color: #111827;
+            font-weight: 500;
+        }
+        .notes-packaging {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+        .notes-spec {
+            background: #dcfce7;
+            color: #166534;
+        }
+        .notes-protection {
+            background: #ffedd5;
+            color: #c2410c;
+        }
         .machine-title {
             display: flex;
             justify-content: space-between;
@@ -479,6 +538,17 @@ def inject_css() -> None:
         @media (max-width: 360px) {
             .block-container { padding-left: 10px; padding-right: 10px; }
             .metrics, .machine-button-grid, .stock-product-grid { grid-template-columns: 1fr; }
+            .production-notes-table,
+            .production-notes-table tbody,
+            .production-notes-table tr,
+            .production-notes-table th,
+            .production-notes-table td {
+                display: block;
+                width: 100%;
+            }
+            .production-notes-group {
+                text-align: left;
+            }
             h1 { font-size: 1.38rem !important; }
         }
         </style>
@@ -622,12 +692,25 @@ def reset_stock_request() -> None:
     st.session_state["stock_last_submitted_id"] = ""
     st.session_state.pop("selected_stock_product_id", None)
     st.session_state.pop("selected_stock_machine_id", None)
+    st.session_state.pop("stock_machine_choice", None)
+    st.session_state["stock_step"] = "machine"
 
 
 def current_request_id() -> str:
     if not st.session_state.get("stock_client_request_id"):
         reset_stock_request()
     return str(st.session_state["stock_client_request_id"])
+
+
+def reset_production_change_request() -> None:
+    st.session_state["production_change_client_request_id"] = str(uuid4())
+    st.session_state["production_change_success"] = None
+
+
+def production_change_request_id() -> str:
+    if not st.session_state.get("production_change_client_request_id"):
+        reset_production_change_request()
+    return str(st.session_state["production_change_client_request_id"])
 
 
 def int_quantity(value: object) -> int:
@@ -835,69 +918,157 @@ def filter_production_items(items: list[dict], keyword: str) -> list[dict]:
     return [item for item in items if all(word in production_item_search_text(item) for word in words)]
 
 
-def stock_in_request_page(settings: MobileCloudSettings) -> None:
-    st.title(t("stock.title"))
-    try:
-        items = load_production_items(settings)
-    except Exception as exc:
-        show_supabase_diagnostic(t("stock.load_error"), exc)
-        return
-    try:
-        products = load_products(settings)
-    except Exception:
-        products = []
-    if not items:
-        st.warning(t("stock.no_items"))
-        return
+STOCK_STEPS = ("machine", "product", "quantity", "confirm")
 
-    success_summary = st.session_state.get("stock_request_success")
-    if success_summary:
-        show_success_card(success_summary)
-        if st.button(t("stock.create_another")):
-            reset_stock_request()
-            st.rerun()
-        return
 
-    selectable_items = [item for item in items if stock_selectable_status(item.get("status"))]
-    machine_ids = sorted(
+def stock_step() -> str:
+    step = str(st.session_state.get("stock_step") or "machine")
+    if step not in STOCK_STEPS:
+        step = "machine"
+    st.session_state["stock_step"] = step
+    return step
+
+
+def stock_key_fragment(value: object) -> str:
+    raw = str(value or "item")
+    safe = "".join(ch if ch.isalnum() else "_" for ch in raw)[:80]
+    return safe or "item"
+
+
+def stock_item_label(item: dict) -> str:
+    return (
+        f"{status_display(item.get('status'))} | "
+        f"{item.get('product_code')} | {item.get('product_name')}"
+    )
+
+
+def stock_machine_ids(selectable_items: list[dict]) -> list[str]:
+    return sorted(
         {str(item.get("machine_id") or "") for item in selectable_items if item.get("machine_id")},
         key=lambda machine: (
-            0 if any(i.get("machine_id") == machine and normalized_queue_status(i.get("status")) == "Running" for i in selectable_items) else 1,
+            0
+            if any(
+                str(i.get("machine_id") or "") == machine
+                and normalized_queue_status(i.get("status")) == "Running"
+                for i in selectable_items
+            )
+            else 1,
             machine,
         ),
     )
+
+
+def stock_items_for_machine(selectable_items: list[dict], machine_id: str) -> list[dict]:
+    return sorted(
+        [
+            item
+            for item in selectable_items
+            if str(item.get("machine_id") or "") == machine_id
+            and stock_selectable_status(item.get("status"))
+        ],
+        key=stock_item_sort_key,
+    )
+
+
+def selected_stock_item(machine_items: list[dict]) -> dict | None:
+    selected_id = str(st.session_state.get("selected_stock_product_id") or "")
+    if not selected_id:
+        return None
+    return next((item for item in machine_items if stock_item_id(item) == selected_id), None)
+
+
+def stock_form_keys(selected_id: str) -> tuple[str, str, str, str]:
+    suffix = stock_key_fragment(selected_id)
+    return (
+        f"stock_mode_{suffix}",
+        f"stock_qty_{suffix}",
+        f"stock_operator_{suffix}",
+        f"stock_note_{suffix}",
+    )
+
+
+def stock_form_values(selected_id: str, pallet_qty: int | None) -> tuple[str, int, str, str]:
+    mode_key, qty_key, operator_key, note_key = stock_form_keys(selected_id)
+    mode = str(st.session_state.get(mode_key) or "full_pallet")
+    if mode not in {"full_pallet", "custom"}:
+        mode = "full_pallet"
+    if mode == "full_pallet":
+        qty = int(pallet_qty or 0)
+    else:
+        qty = int(st.session_state.get(qty_key) or 0)
+    operator = str(st.session_state.get(operator_key) or "").strip()
+    note = str(st.session_state.get(note_key) or "")
+    return mode, qty, operator, note
+
+
+def stock_progress(step: str) -> None:
+    labels = {
+        "machine": t("stock.step_machine"),
+        "product": t("stock.step_product"),
+        "quantity": t("stock.step_quantity"),
+        "confirm": t("stock.step_confirm"),
+    }
+    st.markdown(f"**{escape(labels.get(step, labels['machine']))}**")
+
+
+def stock_summary_card(rows: list[tuple[str, object]]) -> None:
+    html_parts = []
+    for label, value in rows:
+        display_value = "-" if value is None or value == "" else value
+        html_parts.append(
+            f'<div class="label">{escape(str(label))}</div>'
+            f'<div class="value">{escape(str(display_value))}</div>'
+        )
+    body = "".join(html_parts)
+    st.markdown(f'<div class="summary-card">{body}</div>', unsafe_allow_html=True)
+
+
+def _stock_step_machine(selectable_items: list[dict]) -> None:
+    stock_progress("machine")
     st.subheader(t("stock.choose_machine"))
-    machine_search = st.text_input(t("stock.search_machine"))
+    machine_ids = stock_machine_ids(selectable_items)
+    machine_search = st.text_input(t("stock.search_machine"), key="stock_machine_search")
     if machine_search:
         machine_ids = [machine for machine in machine_ids if machine_search.casefold() in machine.casefold()]
     if not machine_ids:
         st.warning(t("stock.no_items"))
         return
-    machine_options = [""] + machine_ids
     machine_id = st.selectbox(
         t("stock.machine"),
-        machine_options,
+        [""] + machine_ids,
+        key="stock_machine_choice",
         format_func=lambda value: t("stock.choose_machine") if not value else value,
     )
     if not machine_id:
         st.info(t("stock.choose_machine_hint"))
         return
-    if st.session_state.get("selected_stock_machine_id") != machine_id:
-        st.session_state["selected_stock_machine_id"] = machine_id
-        st.session_state.pop("selected_stock_product_id", None)
+    st.session_state["selected_stock_machine_id"] = machine_id
+    st.session_state.pop("selected_stock_product_id", None)
+    st.session_state["stock_step"] = "product"
+    st.rerun()
 
-    products_by_code = product_pallet_lookup(products)
-    machine_items_all = [
-        item
-        for item in selectable_items
-        if str(item.get("machine_id")) == machine_id and stock_selectable_status(item.get("status"))
-    ]
-    machine_items_all = sorted(machine_items_all, key=stock_item_sort_key)
+
+def _stock_step_product(selectable_items: list[dict], products_by_code: dict[str, int]) -> None:
+    stock_progress("product")
+    machine_id = str(st.session_state.get("selected_stock_machine_id") or "")
+    if not machine_id:
+        st.warning(t("stock.no_selected_machine"))
+        st.session_state["stock_step"] = "machine"
+        return
+    st.info(f"{t('stock.current_machine')}: {machine_id}")
+    if st.button(t("stock.back_change_machine"), key="stock_back_machine"):
+        st.session_state.pop("selected_stock_machine_id", None)
+        st.session_state.pop("selected_stock_product_id", None)
+        st.session_state.pop("stock_machine_choice", None)
+        st.session_state["stock_step"] = "machine"
+        st.rerun()
+
+    machine_items_all = stock_items_for_machine(selectable_items, machine_id)
     if not machine_items_all:
         st.warning(t("stock.no_machine_products", machine_id=machine_id))
         return
     st.subheader(t("stock.select_product"))
-    product_search = st.text_input(t("stock.search_product"))
+    product_search = st.text_input(t("stock.search_product"), key=f"stock_product_search_{stock_key_fragment(machine_id)}")
     machine_items = filter_production_items(machine_items_all, product_search)
     if not machine_items:
         st.warning(t("stock.no_machine_products", machine_id=machine_id))
@@ -917,25 +1088,58 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             selected = item_id == selected_id
             stock_product_card(item, selected, pallet_for_card)
             button_label = t("stock.selected") if selected else t("stock.select_product")
-            if st.button(button_label, key=f"stock_product_select_{item_id}", type="primary" if selected else "secondary"):
+            if st.button(
+                button_label,
+                key=f"stock_product_select_{stock_key_fragment(item_id)}",
+                type="primary" if selected else "secondary",
+            ):
                 st.session_state["selected_stock_product_id"] = item_id
                 st.session_state["selected_stock_machine_id"] = machine_id
+                st.session_state["stock_step"] = "quantity"
                 st.rerun()
 
-    selected_product = next((item for item in machine_items_all if stock_item_id(item) == selected_id), None)
+
+def _stock_step_quantity(selectable_items: list[dict], products_by_code: dict[str, int]) -> None:
+    stock_progress("quantity")
+    machine_id = str(st.session_state.get("selected_stock_machine_id") or "")
+    machine_items = stock_items_for_machine(selectable_items, machine_id)
+    selected_product = selected_stock_item(machine_items)
+    if not machine_id:
+        st.warning(t("stock.no_selected_machine"))
+        st.session_state["stock_step"] = "machine"
+        return
     if not selected_product:
-        st.info(t("stock.select_product"))
+        st.warning(t("stock.no_selected_product"))
+        st.session_state["stock_step"] = "product"
         return
 
-    selected_label = (
-        f"{status_display(selected_product.get('status'))} | "
-        f"{selected_product.get('product_code')} | {selected_product.get('product_name')}"
-    )
+    selected_id = stock_item_id(selected_product)
     pallet_qty = resolved_pallet_qty(selected_product, products_by_code)
-    mode_options = ["full_pallet", "custom"]
+    mode_key, qty_key, operator_key, note_key = stock_form_keys(selected_id)
+    if mode_key not in st.session_state:
+        st.session_state[mode_key] = "full_pallet"
+    if qty_key not in st.session_state:
+        st.session_state[qty_key] = 1
+    if operator_key not in st.session_state:
+        st.session_state[operator_key] = str(st.session_state.get("stock_last_operator") or "")
+
+    st.info(f"{t('stock.current_machine')}: {machine_id}")
+    stock_summary_card(
+        [
+            (t("stock.confirm_product"), stock_item_label(selected_product)),
+            (t("common.mould"), selected_product.get("mould_number") or "-"),
+            (t("stock.full_pallet_qty"), number_display(pallet_qty) if pallet_qty else "-"),
+        ]
+    )
+    if st.button(t("stock.back_reselect_product"), key="stock_back_product"):
+        st.session_state.pop("selected_stock_product_id", None)
+        st.session_state["stock_step"] = "product"
+        st.rerun()
+
     mode = st.radio(
-        t("stock.request_type"),
-        mode_options,
+        t("stock.quantity_mode"),
+        ["full_pallet", "custom"],
+        key=mode_key,
         format_func=lambda value: {
             "full_pallet": t("stock.full_pallet"),
             "custom": t("stock.custom_quantity"),
@@ -949,37 +1153,40 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             st.info(f"{t('stock.full_pallet_qty')}: {pallet_qty:,}")
             qty = pallet_qty
     else:
-        qty = st.number_input(t("stock.custom_quantity"), min_value=1, step=1, value=1)
-    operator_name = st.text_input(t("common.operator"), placeholder=t("common.required"))
-    note = st.text_area(t("common.note_optional"))
+        qty = st.number_input(t("stock.custom_quantity"), min_value=1, step=1, value=1, key=qty_key)
+    operator_name = st.text_input(t("common.operator"), placeholder=t("common.required"), key=operator_key)
+    note = st.text_area(t("common.note_optional"), key=note_key)
 
+    if st.button(t("stock.next_confirm"), type="primary", disabled=qty <= 0):
+        try:
+            if not machine_id:
+                raise ValueError(t("stock.no_selected_machine"))
+            if not selected_product:
+                raise ValueError(t("stock.no_selected_product"))
+            if mode == "full_pallet" and pallet_qty is None:
+                raise ValueError(t("stock.no_pallet_qty"))
+            int_quantity(qty)
+            if not operator_name.strip():
+                raise ValueError(t("stock.operator_required"))
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        st.session_state["stock_step"] = "confirm"
+        st.rerun()
+
+
+def _submit_stock_in_request(
+    settings: MobileCloudSettings,
+    selected_product: dict,
+    machine_id: str,
+    pallet_qty: int | None,
+    mode: str,
+    qty: int,
+    operator_name: str,
+    note: str,
+) -> None:
     request_id = current_request_id()
-    summary_note = note.strip() or "-"
-    st.markdown(
-        f"""
-        <div class="summary-card">
-            <div class="label">{escape(t("stock.confirm_product"))}</div>
-            <div class="value">{escape(selected_label)}</div>
-            <div class="label">{escape(t("common.machine"))}</div><div class="value">{escape(machine_id)}</div>
-            <div class="label">{escape(t("common.mould"))}</div><div class="value">{escape(str(selected_product.get("mould_number") or "-"))}</div>
-            <div class="label">{escape(t("stock.request_type"))}</div><div class="value">{escape(request_type_label(mode))}</div>
-            <div class="label">{escape(t("common.quantity"))}</div>
-            <div class="value">{escape(str(qty))}</div>
-            <div class="label">{escape(t("common.operator"))}</div>
-            <div class="value">{escape(operator_name.strip() or t("common.required"))}</div>
-            <div class="label">{escape(t("common.note_optional"))}</div>
-            <div class="value">{escape(summary_note)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
-    submitted = st.button(t("stock.submit_request"), type="primary", disabled=qty <= 0)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    if not submitted:
-        return
+    selected_label = stock_item_label(selected_product)
     if st.session_state.get("stock_last_submitted_id") == request_id:
         st.warning(t("stock.duplicate"))
         return
@@ -1015,6 +1222,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             },
             returning=ReturnMethod.minimal,
         ).execute()
+        st.session_state["stock_last_operator"] = operator
         st.session_state["stock_request_success"] = {
             "request_id": request_id,
             "product": selected_label,
@@ -1031,6 +1239,7 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
     except Exception as exc:
         if duplicate_error(exc):
             st.warning(t("stock.received"))
+            st.session_state["stock_last_operator"] = operator_name.strip()
             st.session_state["stock_request_success"] = {
                 "request_id": request_id,
                 "product": selected_label,
@@ -1044,6 +1253,101 @@ def stock_in_request_page(settings: MobileCloudSettings) -> None:
             return
         st.session_state["stock_last_submitted_id"] = ""
         st.error(t("stock.failed"))
+
+
+def _stock_step_confirm(settings: MobileCloudSettings, selectable_items: list[dict], products_by_code: dict[str, int]) -> None:
+    stock_progress("confirm")
+    machine_id = str(st.session_state.get("selected_stock_machine_id") or "")
+    machine_items = stock_items_for_machine(selectable_items, machine_id)
+    selected_product = selected_stock_item(machine_items)
+    if not machine_id:
+        st.warning(t("stock.no_selected_machine"))
+        st.session_state["stock_step"] = "machine"
+        return
+    if not selected_product:
+        st.warning(t("stock.no_selected_product"))
+        st.session_state["stock_step"] = "product"
+        return
+
+    selected_id = stock_item_id(selected_product)
+    pallet_qty = resolved_pallet_qty(selected_product, products_by_code)
+    mode, qty, operator_name, note = stock_form_values(selected_id, pallet_qty)
+    if mode == "full_pallet" and pallet_qty is None:
+        st.error(t("stock.no_pallet_qty"))
+    try:
+        int_quantity(qty)
+        if not operator_name:
+            raise ValueError(t("stock.operator_required"))
+    except ValueError as exc:
+        st.error(str(exc))
+
+    if st.button(t("stock.back_edit_quantity"), key="stock_back_quantity"):
+        st.session_state["stock_step"] = "quantity"
+        st.rerun()
+
+    stock_summary_card(
+        [
+            (t("common.machine"), machine_id),
+            (t("stock.confirm_product"), stock_item_label(selected_product)),
+            (t("common.mould"), selected_product.get("mould_number") or "-"),
+            (t("stock.request_type"), request_type_label(mode)),
+            (t("common.quantity"), qty),
+            (t("common.operator"), operator_name or t("common.required")),
+            (t("common.note_optional"), note.strip() or "-"),
+        ]
+    )
+
+    st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
+    submitted = st.button(t("stock.submit_request"), type="primary", disabled=qty <= 0 or not operator_name)
+    st.markdown("</div>", unsafe_allow_html=True)
+    if not submitted:
+        return
+    if mode == "full_pallet" and pallet_qty is None:
+        st.error(t("stock.no_pallet_qty"))
+        return
+    _submit_stock_in_request(settings, selected_product, machine_id, pallet_qty, mode, qty, operator_name, note)
+
+
+def stock_in_request_page(settings: MobileCloudSettings) -> None:
+    st.title(t("stock.title"))
+    if "stock_step" not in st.session_state:
+        st.session_state["stock_step"] = "machine"
+    current_request_id()
+    try:
+        items = load_production_items(settings)
+    except Exception as exc:
+        show_supabase_diagnostic(t("stock.load_error"), exc)
+        return
+    try:
+        products = load_products(settings)
+    except Exception:
+        products = []
+    if not items:
+        st.warning(t("stock.no_items"))
+        return
+
+    success_summary = st.session_state.get("stock_request_success")
+    if success_summary:
+        show_success_card(success_summary)
+        if st.button(t("stock.create_another")):
+            reset_stock_request()
+            st.rerun()
+        return
+
+    selectable_items = [item for item in items if stock_selectable_status(item.get("status"))]
+    if not selectable_items:
+        st.warning(t("stock.no_items"))
+        return
+    products_by_code = product_pallet_lookup(products)
+    step = stock_step()
+    if step == "machine":
+        _stock_step_machine(selectable_items)
+    elif step == "product":
+        _stock_step_product(selectable_items, products_by_code)
+    elif step == "quantity":
+        _stock_step_quantity(selectable_items, products_by_code)
+    elif step == "confirm":
+        _stock_step_confirm(settings, selectable_items, products_by_code)
 
 
 def status_class(status: object) -> str:
@@ -1072,6 +1376,110 @@ def status_display(status: object) -> str:
     key = f"status.{raw}"
     translated = t(key)
     return (raw or t("machine.no_plan")) if translated == key else translated
+
+
+def note_pairs_from_text(notes: object) -> dict[str, str]:
+    text = str(notes or "").strip()
+    pairs: dict[str, str] = {}
+    if not text:
+        return pairs
+    for part in text.split("|"):
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        clean_key = key.strip().casefold()
+        clean_value = value.strip()
+        if clean_key and clean_value:
+            pairs[clean_key] = clean_value
+    return pairs
+
+
+def note_value(record: dict, parsed_notes: dict[str, str], field_names: list[str], note_names: list[str]) -> str:
+    for field in field_names:
+        value = str(record.get(field) or "").strip()
+        if value and value.upper() not in {"NO", "N", "FALSE", "0", "NONE", "N/A", "-"}:
+            return value
+    for name in note_names:
+        value = parsed_notes.get(name.casefold(), "").strip()
+        if value and value.upper() not in {"NO", "N", "FALSE", "0", "NONE", "N/A", "-"}:
+            return value
+    return ""
+
+
+def mobile_production_notes_table(record: dict) -> str:
+    parsed = note_pairs_from_text(record.get("notes"))
+    pallet_qty = note_value(
+        record,
+        parsed,
+        ["pallet_qty", "PalletQty", "palletQty"],
+        ["Pallet Qty", "PalletQty", "pallet_qty"],
+    )
+    sections = [
+        (
+            t("machine.notes_group_packaging")
+            if t("machine.notes_group_packaging") != "machine.notes_group_packaging"
+            else "Packaging / 包装方式",
+            "notes-packaging",
+            [
+                ("Packaging Type (Type)", note_value(record, parsed, ["packaging_type", "PackagingType"], ["Packaging Type", "Type"])),
+                ("Packaging (Packaging)", note_value(record, parsed, ["packaging_unit", "PackagingUnit"], ["Packaging", "Packaging Unit"])),
+            ],
+        ),
+        (
+            t("machine.notes_group_spec")
+            if t("machine.notes_group_spec") != "machine.notes_group_spec"
+            else "Pack Spec / 包装规格",
+            "notes-spec",
+            [
+                ("Carton/Unit/Stack", note_value(record, parsed, ["carton_unit_stack_qty", "CartonUnitStackQty"], ["Carton/Unit/Stack", "Carton Qty / Unit / Stack"])),
+                ("Pallet Qty", pallet_qty),
+                ("Pallet Bag", note_value(record, parsed, ["pallet_bag", "PalletBag"], ["Pallet Bag"])),
+                ("Pallet Type", note_value(record, parsed, ["pallet_type", "PalletType"], ["Pallet Type"])),
+            ],
+        ),
+        (
+            t("machine.notes_group_protection")
+            if t("machine.notes_group_protection") != "machine.notes_group_protection"
+            else "Protection / 保护与包装",
+            "notes-protection",
+            [
+                ("Wrap Pallet", note_value(record, parsed, ["wrap_pallet", "WrapPallet"], ["Wrap Pallet", "Wrap"])),
+                ("Corner Protector", note_value(record, parsed, ["corner_protector", "CornerProtector"], ["Corner Protector", "Corner"])),
+                ("Extra", note_value(record, parsed, ["additional_packaging", "AdditionalPackaging"], ["Additional Packaging", "Extra Pack", "Extra"])),
+            ],
+        ),
+    ]
+    rows: list[str] = []
+    for group_label, group_class, pairs in sections:
+        visible_pairs = [(label, value) for label, value in pairs if str(value or "").strip()]
+        if not visible_pairs:
+            continue
+        rowspan = len(visible_pairs)
+        for index, (field_label, value) in enumerate(visible_pairs):
+            group_cell = (
+                f'<th class="production-notes-group {group_class}" rowspan="{rowspan}">{escape(group_label)}</th>'
+                if index == 0
+                else ""
+            )
+            rows.append(
+                "<tr>"
+                f"{group_cell}"
+                f'<td class="production-notes-field"><strong>{escape(field_label)}</strong></td>'
+                f'<td class="production-notes-value">{escape(str(value))}</td>'
+                "</tr>"
+            )
+    if not rows:
+        notes = str(record.get("notes") or "").strip()
+        if not notes:
+            return ""
+        return f'<div class="label">{escape(t("machine.notes"))}</div><div class="value">{escape(notes)}</div>'
+    return (
+        '<div class="production-notes-card">'
+        f'<div class="production-notes-title">{escape(t("machine.notes"))}</div>'
+        '<table class="production-notes-table"><tbody>'
+        + "".join(rows)
+        + "</tbody></table></div>"
+    )
 
 
 def parse_updated_at(value: object) -> datetime | None:
@@ -1119,7 +1527,7 @@ def machine_card(machine: dict) -> None:
     status = str(machine.get("status") or "No Plan")
     visible_status = status_display(status)
     status_css = status_class(status)
-    notes = escape(str(machine.get("notes") or "-"))
+    notes_block = mobile_production_notes_table(machine)
     raw_updated_at = machine.get("updated_at")
     updated_at = format_updated_at(raw_updated_at)
     minutes_old = stale_minutes(raw_updated_at)
@@ -1156,8 +1564,7 @@ def machine_card(machine: dict) -> None:
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
             <div class="value">{colour}</div>
-            <div class="label">{escape(t("machine.notes"))}</div>
-            <div class="value">{notes}</div>
+            {notes_block}
             {stale_block}
         </div>
         """,
@@ -1175,6 +1582,9 @@ def production_item_card(item: dict) -> None:
     product_name = escape(str(item.get("product_name") or t("machine.no_plan")))
     product_code = escape(str(item.get("product_code") or "-"))
     mould_number = escape(str(item.get("mould_number") or "-"))
+    material = escape(str(item.get("material") or "-"))
+    colour = escape(str(item.get("colour_masterbatch") or "-"))
+    notes_block = mobile_production_notes_table(item)
     st.markdown(
         f"""
         <div class="public-card {status_css}">
@@ -1194,12 +1604,151 @@ def production_item_card(item: dict) -> None:
             </div>
             <div class="label">{escape(t("machine.mould_number"))}</div>
             <div class="value">{mould_number}</div>
+            <div class="label">{escape(t("machine.material"))}</div>
+            <div class="value">{material}</div>
+            <div class="label">{escape(t("machine.colour"))}</div>
+            <div class="value">{colour}</div>
             <div class="label">{escape(t("machine.last_update"))}</div>
             <div class="value">{escape(updated_at)}</div>
+            {notes_block}
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def report_production_change_form(settings: MobileCloudSettings, machine: dict) -> None:
+    st.subheader("Report Production Change / 报告生产变更")
+    st.info("Mobile users only submit a request. The official production plan will not change until an admin reviews and applies it.")
+    success = st.session_state.get("production_change_success")
+    if success:
+        st.success("生产变更已记录，等待管理员确认。")
+        st.markdown(
+            f"""
+            <div class="success-card">
+                <div class="label">Request ID</div><div class="value">{escape(str(success.get("client_request_id", "-")))}</div>
+                <div class="label">Machine</div><div class="value">{escape(str(success.get("machine_no", "-")))}</div>
+                <div class="label">New Product</div><div class="value">{escape(str(success.get("new_product", "-")))}</div>
+                <div class="label">Status</div><div class="value">Pending Review</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Create another change request / 继续提交另一个变更"):
+            reset_production_change_request()
+            st.rerun()
+        return
+
+    machine_no = str(machine.get("machine_id") or "").strip()
+    old_product_code = str(machine.get("product_code") or "").strip()
+    old_product_name = str(machine.get("product_name") or machine.get("running_product") or "").strip()
+    old_color = str(machine.get("colour_masterbatch") or "").strip()
+    old_plan_qty = int(float(machine.get("planned_qty") or 0))
+    old_completed_qty = int(float(machine.get("completed_qty") or 0))
+    old_remaining_qty = int(float(machine.get("remaining_qty") or max(old_plan_qty - old_completed_qty, 0)))
+
+    st.markdown(
+        f"""
+        <div class="summary-card">
+            <div class="label">Current machine / 当前机器</div><div class="value">{escape(machine_no)}</div>
+            <div class="label">Old product / 原产品</div><div class="value">{escape(old_product_code)} - {escape(old_product_name)}</div>
+            <div class="label">Old colour / 原颜色</div><div class="value">{escape(old_color or "-")}</div>
+            <div class="metrics">
+                <div class="metric"><span class="label">Plan</span><b>{old_plan_qty:,}</b></div>
+                <div class="metric"><span class="label">Done</span><b>{old_completed_qty:,}</b></div>
+                <div class="metric"><span class="label">Remain</span><b>{old_remaining_qty:,}</b></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        products = load_products(settings)
+    except Exception:
+        products = []
+    product_keyword = st.text_input("Search new product / 搜索新产品", key=f"change_product_search_{machine_no}")
+    product_options = filter_products(products, product_keyword)[:80] if products else []
+    selected_product = None
+    if product_options:
+        selected_index = st.selectbox(
+            "New product / 新产品",
+            range(len(product_options)),
+            format_func=lambda idx: product_label(product_options[idx]),
+            key=f"change_product_select_{machine_no}",
+        )
+        selected_product = product_options[int(selected_index)]
+        default_new_code = str(selected_product.get("product_code") or "")
+        default_new_name = str(selected_product.get("product_name") or default_new_code)
+    else:
+        st.warning("No product list is available. Enter product manually.")
+        default_new_code = ""
+        default_new_name = ""
+
+    with st.form(f"production_change_form_{machine_no}"):
+        new_product_code = st.text_input("New product code / 新产品编号", value=default_new_code)
+        new_product_name = st.text_input("New product name / 新产品名称", value=default_new_name)
+        new_color = st.text_input("New colour / 新颜色")
+        change_time = st.text_input("Change time / 变更时间", value=now_display())
+        reported_completed = st.number_input("Reported completed qty / 已完成数量", min_value=0, step=1, value=old_completed_qty)
+        reported_remaining = st.number_input("Reported remaining qty / 剩余数量", min_value=0, step=1, value=old_remaining_qty)
+        reason = st.text_area("Reason / 原因", placeholder="Product/color changed unexpectedly, material issue, urgent order, etc.")
+        reported_by = st.text_input("Reported by / 报告人")
+        note = st.text_area("Note / 备注", placeholder="Optional extra details")
+        st.caption("Photo upload is not saved for production change requests yet. Ask admin to attach evidence separately if needed.")
+        submitted = st.form_submit_button("Submit Change Request / 提交生产变更请求")
+
+    if submitted:
+        if not machine_no:
+            st.error("Machine number is required.")
+            return
+        if not (new_product_code.strip() or new_product_name.strip()):
+            st.error("New product is required.")
+            return
+        if not change_time.strip():
+            st.error("Change time is required.")
+            return
+        if not reported_by.strip():
+            st.error("Reported by is required.")
+            return
+        client_request_id = production_change_request_id()
+        payload = {
+            "client_request_id": client_request_id,
+            "machine_no": machine_no,
+            "old_product_code": old_product_code,
+            "old_product_name": old_product_name,
+            "old_color": old_color,
+            "old_plan_qty": old_plan_qty,
+            "old_completed_qty": old_completed_qty,
+            "old_remaining_qty": old_remaining_qty,
+            "new_product_code": new_product_code.strip(),
+            "new_product_name": new_product_name.strip() or new_product_code.strip(),
+            "new_color": new_color.strip(),
+            "change_time": change_time.strip(),
+            "reported_completed_qty": int(reported_completed),
+            "reported_remaining_qty": int(reported_remaining),
+            "reason": reason.strip(),
+            "reported_by": reported_by.strip(),
+            "note": note.strip(),
+            "photo_url": None,
+            "status": "pending",
+            "review_status": "Pending Review",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            mobile_cloud_client(settings).table("production_change_requests").insert(payload).execute()
+            st.session_state["production_change_success"] = {
+                "client_request_id": client_request_id,
+                "machine_no": machine_no,
+                "new_product": payload["new_product_name"],
+            }
+            st.rerun()
+        except Exception as exc:
+            if duplicate_error(exc):
+                st.warning("This production change request was already submitted. It will not be duplicated.")
+            else:
+                show_supabase_diagnostic("Production change request failed. Ask admin to check Supabase migration.", exc)
 
 
 def machine_button_list(machines: list[dict]) -> None:
@@ -1253,13 +1802,23 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         return
     st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
     machine_card(selected[0])
+    if query_value("production_change", "").strip() in {"1", "true", "yes"}:
+        report_production_change_form(settings, selected[0])
+        return
+    change_url = url_with_lang("machine_status", machine_id=requested_machine_id, production_change="1")
+    st.markdown(
+        f'<a class="machine-button status-changeover" href="{escape(change_url)}">Report Production Change<br><small>报告生产变更</small></a>',
+        unsafe_allow_html=True,
+    )
     try:
         production_items = load_production_items(settings)
     except Exception:
         production_items = []
     machine_items = [
         item for item in production_items
-        if str(item.get("machine_id", "")).strip() == requested_machine_id and stock_selectable_status(item.get("status"))
+        if str(item.get("machine_id", "")).strip() == requested_machine_id
+        and stock_selectable_status(item.get("status"))
+        and str(item.get("status") or "").strip().casefold() != "running"
     ]
     if machine_items:
         st.subheader(t("machine.production_items"))

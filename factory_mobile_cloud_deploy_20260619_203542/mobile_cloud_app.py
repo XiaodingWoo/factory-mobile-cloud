@@ -311,6 +311,65 @@ def inject_css() -> None:
             font-weight: 760;
             overflow-wrap: anywhere;
         }
+        .production-notes-card {
+            margin-top: 0.65rem;
+            border: 1px solid #d8e3f3;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #ffffff;
+        }
+        .production-notes-title {
+            padding: 0.5rem 0.62rem;
+            font-size: 0.92rem;
+            font-weight: 850;
+            color: #1e3a8a;
+            background: #eff6ff;
+            border-bottom: 1px solid #d8e3f3;
+        }
+        .production-notes-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+            font-size: 0.88rem;
+        }
+        .production-notes-table th,
+        .production-notes-table td {
+            border-bottom: 1px solid #e5edf7;
+            padding: 0.45rem 0.5rem;
+            vertical-align: top;
+            overflow-wrap: anywhere;
+        }
+        .production-notes-table tr:last-child th,
+        .production-notes-table tr:last-child td {
+            border-bottom: 0;
+        }
+        .production-notes-group {
+            width: 25%;
+            font-weight: 850;
+            text-align: center;
+        }
+        .production-notes-field {
+            width: 39%;
+            font-weight: 800;
+            color: #1f2937;
+        }
+        .production-notes-value {
+            width: 36%;
+            color: #111827;
+            font-weight: 500;
+        }
+        .notes-packaging {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+        .notes-spec {
+            background: #dcfce7;
+            color: #166534;
+        }
+        .notes-protection {
+            background: #ffedd5;
+            color: #c2410c;
+        }
         .machine-title {
             display: flex;
             justify-content: space-between;
@@ -480,6 +539,17 @@ def inject_css() -> None:
         @media (max-width: 360px) {
             .block-container { padding-left: 10px; padding-right: 10px; }
             .metrics, .machine-button-grid, .stock-product-grid { grid-template-columns: 1fr; }
+            .production-notes-table,
+            .production-notes-table tbody,
+            .production-notes-table tr,
+            .production-notes-table th,
+            .production-notes-table td {
+                display: block;
+                width: 100%;
+            }
+            .production-notes-group {
+                text-align: left;
+            }
             h1 { font-size: 1.38rem !important; }
         }
         </style>
@@ -629,6 +699,17 @@ def current_request_id() -> str:
     if not st.session_state.get("stock_client_request_id"):
         reset_stock_request()
     return str(st.session_state["stock_client_request_id"])
+
+
+def reset_production_change_request() -> None:
+    st.session_state["production_change_client_request_id"] = str(uuid4())
+    st.session_state["production_change_success"] = None
+
+
+def production_change_request_id() -> str:
+    if not st.session_state.get("production_change_client_request_id"):
+        reset_production_change_request()
+    return str(st.session_state["production_change_client_request_id"])
 
 
 def int_quantity(value: object) -> int:
@@ -1069,6 +1150,110 @@ def status_display(status: object) -> str:
     return (raw or t("machine.no_plan")) if translated == key else translated
 
 
+def note_pairs_from_text(notes: object) -> dict[str, str]:
+    text = str(notes or "").strip()
+    pairs: dict[str, str] = {}
+    if not text:
+        return pairs
+    for part in text.split("|"):
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        clean_key = key.strip().casefold()
+        clean_value = value.strip()
+        if clean_key and clean_value:
+            pairs[clean_key] = clean_value
+    return pairs
+
+
+def note_value(record: dict, parsed_notes: dict[str, str], field_names: list[str], note_names: list[str]) -> str:
+    for field in field_names:
+        value = str(record.get(field) or "").strip()
+        if value and value.upper() not in {"NO", "N", "FALSE", "0", "NONE", "N/A", "-"}:
+            return value
+    for name in note_names:
+        value = parsed_notes.get(name.casefold(), "").strip()
+        if value and value.upper() not in {"NO", "N", "FALSE", "0", "NONE", "N/A", "-"}:
+            return value
+    return ""
+
+
+def mobile_production_notes_table(record: dict) -> str:
+    parsed = note_pairs_from_text(record.get("notes"))
+    pallet_qty = note_value(
+        record,
+        parsed,
+        ["pallet_qty", "PalletQty", "palletQty"],
+        ["Pallet Qty", "PalletQty", "pallet_qty"],
+    )
+    sections = [
+        (
+            t("machine.notes_group_packaging")
+            if t("machine.notes_group_packaging") != "machine.notes_group_packaging"
+            else "Packaging / 包装方式",
+            "notes-packaging",
+            [
+                ("Packaging Type (Type)", note_value(record, parsed, ["packaging_type", "PackagingType"], ["Packaging Type", "Type"])),
+                ("Packaging (Packaging)", note_value(record, parsed, ["packaging_unit", "PackagingUnit"], ["Packaging", "Packaging Unit"])),
+            ],
+        ),
+        (
+            t("machine.notes_group_spec")
+            if t("machine.notes_group_spec") != "machine.notes_group_spec"
+            else "Pack Spec / 包装规格",
+            "notes-spec",
+            [
+                ("Carton/Unit/Stack", note_value(record, parsed, ["carton_unit_stack_qty", "CartonUnitStackQty"], ["Carton/Unit/Stack", "Carton Qty / Unit / Stack"])),
+                ("Pallet Qty", pallet_qty),
+                ("Pallet Bag", note_value(record, parsed, ["pallet_bag", "PalletBag"], ["Pallet Bag"])),
+                ("Pallet Type", note_value(record, parsed, ["pallet_type", "PalletType"], ["Pallet Type"])),
+            ],
+        ),
+        (
+            t("machine.notes_group_protection")
+            if t("machine.notes_group_protection") != "machine.notes_group_protection"
+            else "Protection / 保护与包装",
+            "notes-protection",
+            [
+                ("Wrap Pallet", note_value(record, parsed, ["wrap_pallet", "WrapPallet"], ["Wrap Pallet", "Wrap"])),
+                ("Corner Protector", note_value(record, parsed, ["corner_protector", "CornerProtector"], ["Corner Protector", "Corner"])),
+                ("Extra", note_value(record, parsed, ["additional_packaging", "AdditionalPackaging"], ["Additional Packaging", "Extra Pack", "Extra"])),
+            ],
+        ),
+    ]
+    rows: list[str] = []
+    for group_label, group_class, pairs in sections:
+        visible_pairs = [(label, value) for label, value in pairs if str(value or "").strip()]
+        if not visible_pairs:
+            continue
+        rowspan = len(visible_pairs)
+        for index, (field_label, value) in enumerate(visible_pairs):
+            group_cell = (
+                f'<th class="production-notes-group {group_class}" rowspan="{rowspan}">{escape(group_label)}</th>'
+                if index == 0
+                else ""
+            )
+            rows.append(
+                "<tr>"
+                f"{group_cell}"
+                f'<td class="production-notes-field"><strong>{escape(field_label)}</strong></td>'
+                f'<td class="production-notes-value">{escape(str(value))}</td>'
+                "</tr>"
+            )
+    if not rows:
+        notes = str(record.get("notes") or "").strip()
+        if not notes:
+            return ""
+        return f'<div class="label">{escape(t("machine.notes"))}</div><div class="value">{escape(notes)}</div>'
+    return (
+        '<div class="production-notes-card">'
+        f'<div class="production-notes-title">{escape(t("machine.notes"))}</div>'
+        '<table class="production-notes-table"><tbody>'
+        + "".join(rows)
+        + "</tbody></table></div>"
+    )
+
+
 def parse_updated_at(value: object) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -1114,7 +1299,7 @@ def machine_card(machine: dict) -> None:
     status = str(machine.get("status") or "No Plan")
     visible_status = status_display(status)
     status_css = status_class(status)
-    notes = escape(str(machine.get("notes") or "-"))
+    notes_block = mobile_production_notes_table(machine)
     raw_updated_at = machine.get("updated_at")
     updated_at = format_updated_at(raw_updated_at)
     minutes_old = stale_minutes(raw_updated_at)
@@ -1151,8 +1336,7 @@ def machine_card(machine: dict) -> None:
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
             <div class="value">{colour}</div>
-            <div class="label">{escape(t("machine.notes"))}</div>
-            <div class="value">{notes}</div>
+            {notes_block}
             {stale_block}
         </div>
         """,
@@ -1170,6 +1354,9 @@ def production_item_card(item: dict) -> None:
     product_name = escape(str(item.get("product_name") or t("machine.no_plan")))
     product_code = escape(str(item.get("product_code") or "-"))
     mould_number = escape(str(item.get("mould_number") or "-"))
+    material = escape(str(item.get("material") or "-"))
+    colour = escape(str(item.get("colour_masterbatch") or "-"))
+    notes_block = mobile_production_notes_table(item)
     st.markdown(
         f"""
         <div class="public-card {status_css}">
@@ -1189,12 +1376,151 @@ def production_item_card(item: dict) -> None:
             </div>
             <div class="label">{escape(t("machine.mould_number"))}</div>
             <div class="value">{mould_number}</div>
+            <div class="label">{escape(t("machine.material"))}</div>
+            <div class="value">{material}</div>
+            <div class="label">{escape(t("machine.colour"))}</div>
+            <div class="value">{colour}</div>
             <div class="label">{escape(t("machine.last_update"))}</div>
             <div class="value">{escape(updated_at)}</div>
+            {notes_block}
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def report_production_change_form(settings: MobileCloudSettings, machine: dict) -> None:
+    st.subheader("Report Production Change / 报告生产变更")
+    st.info("Mobile users only submit a request. The official production plan will not change until an admin reviews and applies it.")
+    success = st.session_state.get("production_change_success")
+    if success:
+        st.success("生产变更已记录，等待管理员确认。")
+        st.markdown(
+            f"""
+            <div class="success-card">
+                <div class="label">Request ID</div><div class="value">{escape(str(success.get("client_request_id", "-")))}</div>
+                <div class="label">Machine</div><div class="value">{escape(str(success.get("machine_no", "-")))}</div>
+                <div class="label">New Product</div><div class="value">{escape(str(success.get("new_product", "-")))}</div>
+                <div class="label">Status</div><div class="value">Pending Review</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Create another change request / 继续提交另一个变更"):
+            reset_production_change_request()
+            st.rerun()
+        return
+
+    machine_no = str(machine.get("machine_id") or "").strip()
+    old_product_code = str(machine.get("product_code") or "").strip()
+    old_product_name = str(machine.get("product_name") or machine.get("running_product") or "").strip()
+    old_color = str(machine.get("colour_masterbatch") or "").strip()
+    old_plan_qty = int(float(machine.get("planned_qty") or 0))
+    old_completed_qty = int(float(machine.get("completed_qty") or 0))
+    old_remaining_qty = int(float(machine.get("remaining_qty") or max(old_plan_qty - old_completed_qty, 0)))
+
+    st.markdown(
+        f"""
+        <div class="summary-card">
+            <div class="label">Current machine / 当前机器</div><div class="value">{escape(machine_no)}</div>
+            <div class="label">Old product / 原产品</div><div class="value">{escape(old_product_code)} - {escape(old_product_name)}</div>
+            <div class="label">Old colour / 原颜色</div><div class="value">{escape(old_color or "-")}</div>
+            <div class="metrics">
+                <div class="metric"><span class="label">Plan</span><b>{old_plan_qty:,}</b></div>
+                <div class="metric"><span class="label">Done</span><b>{old_completed_qty:,}</b></div>
+                <div class="metric"><span class="label">Remain</span><b>{old_remaining_qty:,}</b></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        products = load_products(settings)
+    except Exception:
+        products = []
+    product_keyword = st.text_input("Search new product / 搜索新产品", key=f"change_product_search_{machine_no}")
+    product_options = filter_products(products, product_keyword)[:80] if products else []
+    selected_product = None
+    if product_options:
+        selected_index = st.selectbox(
+            "New product / 新产品",
+            range(len(product_options)),
+            format_func=lambda idx: product_label(product_options[idx]),
+            key=f"change_product_select_{machine_no}",
+        )
+        selected_product = product_options[int(selected_index)]
+        default_new_code = str(selected_product.get("product_code") or "")
+        default_new_name = str(selected_product.get("product_name") or default_new_code)
+    else:
+        st.warning("No product list is available. Enter product manually.")
+        default_new_code = ""
+        default_new_name = ""
+
+    with st.form(f"production_change_form_{machine_no}"):
+        new_product_code = st.text_input("New product code / 新产品编号", value=default_new_code)
+        new_product_name = st.text_input("New product name / 新产品名称", value=default_new_name)
+        new_color = st.text_input("New colour / 新颜色")
+        change_time = st.text_input("Change time / 变更时间", value=now_display())
+        reported_completed = st.number_input("Reported completed qty / 已完成数量", min_value=0, step=1, value=old_completed_qty)
+        reported_remaining = st.number_input("Reported remaining qty / 剩余数量", min_value=0, step=1, value=old_remaining_qty)
+        reason = st.text_area("Reason / 原因", placeholder="Product/color changed unexpectedly, material issue, urgent order, etc.")
+        reported_by = st.text_input("Reported by / 报告人")
+        note = st.text_area("Note / 备注", placeholder="Optional extra details")
+        st.caption("Photo upload is not saved for production change requests yet. Ask admin to attach evidence separately if needed.")
+        submitted = st.form_submit_button("Submit Change Request / 提交生产变更请求")
+
+    if submitted:
+        if not machine_no:
+            st.error("Machine number is required.")
+            return
+        if not (new_product_code.strip() or new_product_name.strip()):
+            st.error("New product is required.")
+            return
+        if not change_time.strip():
+            st.error("Change time is required.")
+            return
+        if not reported_by.strip():
+            st.error("Reported by is required.")
+            return
+        client_request_id = production_change_request_id()
+        payload = {
+            "client_request_id": client_request_id,
+            "machine_no": machine_no,
+            "old_product_code": old_product_code,
+            "old_product_name": old_product_name,
+            "old_color": old_color,
+            "old_plan_qty": old_plan_qty,
+            "old_completed_qty": old_completed_qty,
+            "old_remaining_qty": old_remaining_qty,
+            "new_product_code": new_product_code.strip(),
+            "new_product_name": new_product_name.strip() or new_product_code.strip(),
+            "new_color": new_color.strip(),
+            "change_time": change_time.strip(),
+            "reported_completed_qty": int(reported_completed),
+            "reported_remaining_qty": int(reported_remaining),
+            "reason": reason.strip(),
+            "reported_by": reported_by.strip(),
+            "note": note.strip(),
+            "photo_url": None,
+            "status": "pending",
+            "review_status": "Pending Review",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            mobile_cloud_client(settings).table("production_change_requests").insert(payload).execute()
+            st.session_state["production_change_success"] = {
+                "client_request_id": client_request_id,
+                "machine_no": machine_no,
+                "new_product": payload["new_product_name"],
+            }
+            st.rerun()
+        except Exception as exc:
+            if duplicate_error(exc):
+                st.warning("This production change request was already submitted. It will not be duplicated.")
+            else:
+                show_supabase_diagnostic("Production change request failed. Ask admin to check Supabase migration.", exc)
 
 
 def machine_button_list(machines: list[dict]) -> None:
@@ -1248,13 +1574,23 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         return
     st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
     machine_card(selected[0])
+    if query_value("production_change", "").strip() in {"1", "true", "yes"}:
+        report_production_change_form(settings, selected[0])
+        return
+    change_url = url_with_lang("machine_status", machine_id=requested_machine_id, production_change="1")
+    st.markdown(
+        f'<a class="machine-button status-changeover" href="{escape(change_url)}">Report Production Change<br><small>报告生产变更</small></a>',
+        unsafe_allow_html=True,
+    )
     try:
         production_items = load_production_items(settings)
     except Exception:
         production_items = []
     machine_items = [
         item for item in production_items
-        if str(item.get("machine_id", "")).strip() == requested_machine_id and stock_selectable_status(item.get("status"))
+        if str(item.get("machine_id", "")).strip() == requested_machine_id
+        and stock_selectable_status(item.get("status"))
+        and str(item.get("status") or "").strip().casefold() != "running"
     ]
     if machine_items:
         st.subheader(t("machine.production_items"))

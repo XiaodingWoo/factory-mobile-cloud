@@ -491,6 +491,27 @@ def inject_css() -> None:
         .summary-card {
             border-left: 5px solid #2563eb;
         }
+        .stock-product-field.qty-planned {
+            background: #dbeafe;
+            border: 1px solid #93c5fd;
+        }
+        .stock-product-field.qty-planned .field-value {
+            color: #1d4ed8;
+        }
+        .stock-product-field.qty-completed {
+            background: #dcfce7;
+            border: 1px solid #86efac;
+        }
+        .stock-product-field.qty-completed .field-value {
+            color: #15803d;
+        }
+        .stock-product-field.qty-remaining {
+            background: #ffedd5;
+            border: 1px solid #fdba74;
+        }
+        .stock-product-field.qty-remaining .field-value {
+            color: #c2410c;
+        }
         .success-card {
             border-left: 5px solid #16a34a;
         }
@@ -693,6 +714,7 @@ def reset_stock_request() -> None:
     st.session_state.pop("selected_stock_product_id", None)
     st.session_state.pop("selected_stock_machine_id", None)
     st.session_state.pop("stock_machine_choice", None)
+    st.session_state.pop("stock_in_draft", None)
     st.session_state["stock_step"] = "machine"
 
 
@@ -877,18 +899,18 @@ def stock_product_card(item: dict, selected: bool, pallet_qty: int | None) -> No
     remaining = item_remaining_qty(item)
     selected_flag = f'<span class="selected-flag">{escape(t("stock.selected"))}</span>' if selected else ""
     fields = [
-        (t("machine.planned"), number_display(item.get("planned_qty"))),
-        (t("machine.done"), number_display(item.get("completed_qty"))),
-        (t("stock.product_card_remaining"), number_display(remaining)),
-        (t("machine.mould_number"), str(item.get("mould_number") or "-")),
-        (t("machine.material"), str(item.get("material") or "-")),
-        (t("machine.colour"), str(item.get("colour_masterbatch") or "-")),
-        (t("stock.full_pallet_qty"), number_display(pallet_qty) if pallet_qty else "-"),
+        (t("machine.planned"), number_display(item.get("planned_qty")), "qty-planned"),
+        (t("machine.done"), number_display(item.get("completed_qty")), "qty-completed"),
+        (t("stock.product_card_remaining"), number_display(remaining), "qty-remaining"),
+        (t("machine.mould_number"), str(item.get("mould_number") or "-"), ""),
+        (t("machine.material"), str(item.get("material") or "-"), ""),
+        (t("machine.colour"), str(item.get("colour_masterbatch") or "-"), ""),
+        (t("stock.full_pallet_qty"), number_display(pallet_qty) if pallet_qty else "-", ""),
     ]
     field_html = "".join(
-        f'<div class="stock-product-field"><div class="field-label">{escape(str(label))}</div>'
+        f'<div class="stock-product-field {css_name}"><div class="field-label">{escape(str(label))}</div>'
         f'<div class="field-value">{escape(str(value))}</div></div>'
-        for label, value in fields
+        for label, value, css_name in fields
     )
     html = "".join(
         [
@@ -1171,6 +1193,13 @@ def _stock_step_quantity(selectable_items: list[dict], products_by_code: dict[st
         except ValueError as exc:
             st.error(str(exc))
             return
+        st.session_state["stock_in_draft"] = {
+            "selected_id": selected_id,
+            "mode": mode,
+            "qty": int(qty),
+            "operator_name": operator_name.strip(),
+            "note": note,
+        }
         st.session_state["stock_step"] = "confirm"
         st.rerun()
 
@@ -1271,7 +1300,14 @@ def _stock_step_confirm(settings: MobileCloudSettings, selectable_items: list[di
 
     selected_id = stock_item_id(selected_product)
     pallet_qty = resolved_pallet_qty(selected_product, products_by_code)
-    mode, qty, operator_name, note = stock_form_values(selected_id, pallet_qty)
+    draft = st.session_state.get("stock_in_draft") or {}
+    if draft.get("selected_id") == selected_id:
+        mode = str(draft.get("mode") or "full_pallet")
+        qty = int(draft.get("qty") or 0)
+        operator_name = str(draft.get("operator_name") or "").strip()
+        note = str(draft.get("note") or "")
+    else:
+        mode, qty, operator_name, note = stock_form_values(selected_id, pallet_qty)
     if mode == "full_pallet" and pallet_qty is None:
         st.error(t("stock.no_pallet_qty"))
     try:

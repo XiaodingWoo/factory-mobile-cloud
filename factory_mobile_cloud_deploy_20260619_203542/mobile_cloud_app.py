@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import json
 from datetime import datetime, timezone
 from html import escape
 from urllib.parse import urlencode
@@ -430,6 +431,81 @@ def inject_css() -> None:
             font-weight: 650;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
+        }
+        .mould-readonly-card {
+            margin: 0.62rem 0;
+            border: 1px solid #d8e3f3;
+            border-radius: 12px;
+            background: #ffffff;
+            overflow: hidden;
+        }
+        .mould-readonly-title {
+            padding: 0.56rem 0.68rem;
+            background: #eff6ff;
+            color: #1e3a8a;
+            font-size: 0.96rem;
+            font-weight: 900;
+            border-bottom: 1px solid #d8e3f3;
+        }
+        .mould-readonly-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.48rem;
+            padding: 0.62rem;
+        }
+        .mould-kv {
+            min-width: 0;
+            border: 1px solid #e5edf7;
+            border-radius: 10px;
+            background: #f8fafc;
+            padding: 0.52rem;
+        }
+        .mould-kv-label {
+            color: #5f6878;
+            font-size: 0.78rem;
+            font-weight: 760;
+            line-height: 1.2;
+        }
+        .mould-kv-value {
+            color: #172033;
+            font-size: 1rem;
+            font-weight: 880;
+            margin-top: 0.18rem;
+            overflow-wrap: anywhere;
+        }
+        .mould-stage-list {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0.5rem;
+            padding: 0.62rem;
+        }
+        .mould-stage-card {
+            border: 1px solid #e5edf7;
+            border-radius: 10px;
+            background: #ffffff;
+            padding: 0.58rem;
+        }
+        .mould-stage-name {
+            color: #111827;
+            font-size: 0.96rem;
+            font-weight: 900;
+            margin-bottom: 0.42rem;
+        }
+        .mould-note-readonly {
+            margin: 0.62rem;
+            padding: 0.62rem;
+            border-radius: 10px;
+            background: #f8fafc;
+            border: 1px solid #e5edf7;
+            color: #172033;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            font-weight: 650;
+        }
+        @media (max-width: 480px) {
+            .mould-readonly-grid {
+                grid-template-columns: 1fr;
+            }
         }
         .notes-packaging {
             background: #dbeafe;
@@ -2571,17 +2647,117 @@ def _readonly_value(value: object) -> str:
     return text if text else "-"
 
 
-def _summary_table_rows(rows: object, columns: list[str]) -> list[dict[str, object]]:
+def _payload(value: object) -> object:
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:
+            return {}
+    return {}
+
+
+def _has_value(value: object) -> bool:
+    text = str(value or "").strip()
+    return text not in {"", "-", "None", "none", "nan", "NaN", "null"}
+
+
+def _format_param(value: object, unit: str = "") -> str:
+    if not _has_value(value):
+        return "-"
+    try:
+        number = float(value)
+        text = str(int(number)) if number.is_integer() else f"{number:g}"
+    except Exception:
+        text = str(value)
+    return f"{text}{unit}" if unit and text != "-" else text
+
+
+def _kv_html(label: str, value: object, unit: str = "") -> str:
+    return (
+        '<div class="mould-kv">'
+        f'<div class="mould-kv-label">{escape(label)}</div>'
+        f'<div class="mould-kv-value">{escape(_format_param(value, unit))}</div>'
+        '</div>'
+    )
+
+
+def _section_html(title: str, body: str) -> str:
+    if not body:
+        return ""
+    return (
+        '<div class="mould-readonly-card">'
+        f'<div class="mould-readonly-title">{escape(title)}</div>'
+        f'{body}'
+        '</div>'
+    )
+
+
+def _grid_html(items: list[tuple[str, object, str]]) -> str:
+    body = "".join(_kv_html(label, value, unit) for label, value, unit in items)
+    return f'<div class="mould-readonly-grid">{body}</div>'
+
+
+def _stage_cards_html(title: str, rows_value: object, fields: list[tuple[str, str, str]]) -> str:
+    rows = _payload(rows_value)
     if not isinstance(rows, list):
-        return []
-    cleaned: list[dict[str, object]] = []
+        return ""
+    cards: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        item = {column.title(): row.get(column) for column in columns}
-        if any(str(value or "").strip() not in {"", "None"} for value in item.values()):
-            cleaned.append(item)
-    return cleaned
+        if not any(_has_value(row.get(key)) for _, key, _ in fields):
+            continue
+        stage = _format_param(row.get("stage"))
+        values = "".join(_kv_html(label, row.get(key), unit) for label, key, unit in fields)
+        cards.append(
+            '<div class="mould-stage-card">'
+            f'<div class="mould-stage-name">Stage {escape(stage)}</div>'
+            f'<div class="mould-readonly-grid">{values}</div>'
+            '</div>'
+        )
+    return _section_html(title, f'<div class="mould-stage-list">{"".join(cards)}</div>') if cards else ""
+
+
+def _time_summary_html(setting_row: dict) -> str:
+    times = _payload(setting_row.get("core_time_summary"))
+    if not isinstance(times, dict):
+        times = {}
+    items = [
+        ("Injection time / 注塑时间", times.get("injection_time_seconds"), " s"),
+        ("Holding total / 保压总时间", times.get("holding_time_seconds"), " s"),
+        ("Cooling time / 冷却时间", times.get("cooling_time_seconds"), " s"),
+        ("Cycle time / 周期时间", times.get("cycle_time_seconds") or setting_row.get("cycle_time_seconds"), " s"),
+    ]
+    if not any(_has_value(value) for _, value, _ in items):
+        return ""
+    return _section_html("Core time / 核心时间", _grid_html(items))
+
+
+def _temperature_html(setting_row: dict) -> str:
+    temp = _payload(setting_row.get("temperature_summary"))
+    if not isinstance(temp, dict):
+        temp = {}
+    items = [
+        ("Nozzle / 射嘴", temp.get("nozzle"), " C"),
+        ("Barrel 1 / 炮筒1", temp.get("barrel_1"), " C"),
+        ("Barrel 2 / 炮筒2", temp.get("barrel_2"), " C"),
+        ("Barrel 3 / 炮筒3", temp.get("barrel_3"), " C"),
+        ("Barrel 4 / 炮筒4", temp.get("barrel_4"), " C"),
+    ]
+    hot_rows = _payload(setting_row.get("hot_runner_summary"))
+    if isinstance(hot_rows, list):
+        for row in hot_rows[:4]:
+            if isinstance(row, dict):
+                name = str(row.get("zone_name") or f"Zone {row.get('zone_number') or ''}").strip()
+                items.append((f"Hot runner {name} / 热流道{name}", row.get("temperature"), " C"))
+    if not any(_has_value(value) for _, value, _ in items):
+        return ""
+    return _section_html("Temperature / 温度", _grid_html(items))
 
 
 def render_readonly_mould_info(
@@ -2595,58 +2771,66 @@ def render_readonly_mould_info(
         return
     mould_row = (moulds_by_number or {}).get(mould_text.casefold(), {})
     setting_row = (settings_by_pair or {}).get((mould_text.casefold(), machine_text.casefold()), {})
-    with st.expander(f"View mould info / 查看模具信息 - {mould_text}", expanded=False):
+    with st.expander(f"View mould info and core parameters / 查看模具信息和核心参数 - {mould_text}", expanded=False):
         st.caption("Read only / 只读显示")
-        st.markdown(f"**Mould Number / 模具编号:** {escape(mould_text)}")
-        if mould_row:
-            st.markdown(f"**Mould Name / 模具名称:** {escape(_readonly_value(mould_row.get('mould_name') or mould_row.get('associated_products')))}")
-            st.markdown(f"**Status / 状态:** {escape(_readonly_value(mould_row.get('computed_status') or mould_row.get('status')))}")
-            st.markdown(f"**Location / 位置:** {escape(_readonly_value(mould_row.get('computed_location') or mould_row.get('storage_location')))}")
-            notes = str(mould_row.get("notes") or "").strip()
-            if notes:
-                st.markdown("**Mould Notes / 模具备注**")
-                st.info(notes)
-        else:
+        mould_items = [
+            ("Mould Number / 模具编号", mould_text, ""),
+            ("Mould Name / 模具名称", mould_row.get("mould_name") or mould_row.get("associated_products") if mould_row else "-", ""),
+            ("Status / 状态", mould_row.get("computed_status") or mould_row.get("status") if mould_row else "-", ""),
+            ("Location / 位置", mould_row.get("computed_location") or mould_row.get("storage_location") if mould_row else "-", ""),
+        ]
+        st.markdown(_section_html("Mould / 模具", _grid_html(mould_items)), unsafe_allow_html=True)
+        notes = str(mould_row.get("notes") or "").strip() if mould_row else ""
+        if notes:
+            st.markdown(
+                _section_html(
+                    "Mould notes / 模具备注",
+                    f'<div class="mould-note-readonly">{escape(notes)}</div>',
+                ),
+                unsafe_allow_html=True,
+            )
+        elif not mould_row:
             st.info("No mould snapshot published yet. Ask office PC to run publish-only sync. / 云端暂未发布该模具资料。")
 
         if setting_row:
-            st.markdown("---")
-            st.markdown(
-                f"**Machine Parameter / 机器参数:** Machine {escape(machine_text or '-')}  "
-                f"**Version:** V{escape(_readonly_value(setting_row.get('version')))}"
+            header = _grid_html(
+                [
+                    ("Machine / 机器", machine_text or "-", ""),
+                    ("Version / 版本", f"V{_readonly_value(setting_row.get('version'))}", ""),
+                    ("Updated / 更新", format_updated_at(setting_row.get("updated_at")), ""),
+                    ("Updated by / 更新人", setting_row.get("updated_by") or "-", ""),
+                ]
             )
-            if setting_row.get("cycle_time_seconds") not in {None, ""}:
-                st.markdown(f"**Cycle Time / 周期:** {escape(str(setting_row.get('cycle_time_seconds')))} s")
+            st.markdown(_section_html("Machine parameter snapshot / 机器参数快照", header), unsafe_allow_html=True)
             setting_notes = str(setting_row.get("notes") or "").strip()
             if setting_notes:
-                st.markdown("**Parameter Notes / 参数备注**")
-                st.info(setting_notes)
-
-            injection_rows = _summary_table_rows(setting_row.get("injection_summary"), ["stage", "pressure", "speed", "position"])
-            if injection_rows:
-                st.markdown("**Injection / 注塑**")
-                st.table(injection_rows)
-            holding_rows = _summary_table_rows(setting_row.get("holding_summary"), ["stage", "pressure", "speed", "time"])
-            if holding_rows:
-                st.markdown("**Holding / 保压**")
-                st.table(holding_rows)
-            temp = setting_row.get("temperature_summary")
-            if isinstance(temp, dict) and any(value not in {None, ""} for value in temp.values()):
-                st.markdown("**Temperature / 温度**")
-                st.table(
-                    [
-                        {
-                            "Nozzle": temp.get("nozzle"),
-                            "Barrel 1": temp.get("barrel_1"),
-                            "Barrel 2": temp.get("barrel_2"),
-                            "Barrel 3": temp.get("barrel_3"),
-                            "Barrel 4": temp.get("barrel_4"),
-                        }
-                    ]
+                st.markdown(
+                    _section_html(
+                        "Parameter notes / 参数备注",
+                        f'<div class="mould-note-readonly">{escape(setting_notes)}</div>',
+                    ),
+                    unsafe_allow_html=True,
                 )
+            param_html = (
+                _time_summary_html(setting_row)
+                + _stage_cards_html(
+                    "Injection / 注塑",
+                    setting_row.get("injection_summary"),
+                    [("Pressure / 压力", "pressure", ""), ("Speed / 速度", "speed", ""), ("Position / 位置", "position", "")],
+                )
+                + _stage_cards_html(
+                    "Holding / 保压",
+                    setting_row.get("holding_summary"),
+                    [("Pressure / 压力", "pressure", ""), ("Speed / 速度", "speed", ""), ("Time / 时间", "time", " s")],
+                )
+                + _temperature_html(setting_row)
+            )
+            if param_html:
+                st.markdown(param_html, unsafe_allow_html=True)
+            else:
+                st.info("Parameter snapshot exists, but core parameter fields are empty. / 已有参数快照，但核心参数字段为空。")
         else:
-            st.caption("No mould-machine parameter snapshot for this machine yet. / 该机器暂无模具参数快照。")
-
+            st.warning("No mould-machine parameter snapshot for this machine yet. Run publish-only sync after saving mould parameters. / 该机器暂无模具参数快照，请保存参数后运行发布同步。")
 
 def machine_button_list(machines: list[dict]) -> None:
     links = []

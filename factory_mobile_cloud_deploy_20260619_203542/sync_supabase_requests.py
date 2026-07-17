@@ -827,6 +827,12 @@ def mould_machine_settings_public_rows() -> list[dict[str, Any]]:
                 "machine_id": machine_id,
                 "version": int(number_or_zero(row.get("Version"))),
                 "cycle_time_seconds": setting_float_or_none(row.get("cycle_time_seconds")),
+                "core_time_summary": {
+                    "injection_time_seconds": setting_float_or_none(row.get("injection_time_seconds")),
+                    "holding_time_seconds": setting_float_or_none(row.get("holding_time_seconds")),
+                    "cooling_time_seconds": setting_float_or_none(row.get("cooling_time_seconds")),
+                    "cycle_time_seconds": setting_float_or_none(row.get("cycle_time_seconds")),
+                },
                 "injection_summary": injection_summary,
                 "holding_summary": holding_summary,
                 "temperature_summary": temperature_summary,

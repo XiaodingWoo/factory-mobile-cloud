@@ -2343,7 +2343,6 @@ def machine_card(machine: dict, moulds_by_number: dict[str, dict] | None = None,
     visible_status = status_display(status)
     status_css = status_class(status)
     notes_block = mobile_production_notes_table(machine)
-    mould_note_block = cloud_mould_note_block(machine.get("mould_number"), machine.get("machine_id"), moulds_by_number, settings_by_pair)
     raw_updated_at = machine.get("updated_at")
     updated_at = format_updated_at(raw_updated_at)
     minutes_old = stale_minutes(raw_updated_at)
@@ -2376,7 +2375,6 @@ def machine_card(machine: dict, moulds_by_number: dict[str, dict] | None = None,
             </div>
             <div class="label">{escape(t("machine.mould_number"))}</div>
             <div class="value">{mould_number}</div>
-            {mould_note_block}
             <div class="label">{escape(t("machine.material"))}</div>
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
@@ -2402,7 +2400,6 @@ def production_item_card(item: dict, moulds_by_number: dict[str, dict] | None = 
     material = escape(str(item.get("material") or "-"))
     colour = escape(str(item.get("colour_masterbatch") or "-"))
     notes_block = mobile_production_notes_table(item)
-    mould_note_block = cloud_mould_note_block(item.get("mould_number"), item.get("machine_id"), moulds_by_number, settings_by_pair)
     st.markdown(
         f"""
         <div class="public-card {status_css}">
@@ -2422,7 +2419,6 @@ def production_item_card(item: dict, moulds_by_number: dict[str, dict] | None = 
             </div>
             <div class="label">{escape(t("machine.mould_number"))}</div>
             <div class="value">{mould_number}</div>
-            {mould_note_block}
             <div class="label">{escape(t("machine.material"))}</div>
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
@@ -2570,6 +2566,88 @@ def report_production_change_form(settings: MobileCloudSettings, machine: dict) 
                 show_supabase_diagnostic("Production change request failed. Ask admin to check Supabase migration.", exc)
 
 
+def _readonly_value(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text else "-"
+
+
+def _summary_table_rows(rows: object, columns: list[str]) -> list[dict[str, object]]:
+    if not isinstance(rows, list):
+        return []
+    cleaned: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = {column.title(): row.get(column) for column in columns}
+        if any(str(value or "").strip() not in {"", "None"} for value in item.values()):
+            cleaned.append(item)
+    return cleaned
+
+
+def render_readonly_mould_info(
+    record: dict,
+    moulds_by_number: dict[str, dict] | None = None,
+    settings_by_pair: dict[tuple[str, str], dict] | None = None,
+) -> None:
+    mould_text = str(record.get("mould_number") or "").strip()
+    machine_text = str(record.get("machine_id") or "").strip()
+    if not mould_text:
+        return
+    mould_row = (moulds_by_number or {}).get(mould_text.casefold(), {})
+    setting_row = (settings_by_pair or {}).get((mould_text.casefold(), machine_text.casefold()), {})
+    with st.expander(f"View mould info / 查看模具信息 - {mould_text}", expanded=False):
+        st.caption("Read only / 只读显示")
+        st.markdown(f"**Mould Number / 模具编号:** {escape(mould_text)}")
+        if mould_row:
+            st.markdown(f"**Mould Name / 模具名称:** {escape(_readonly_value(mould_row.get('mould_name') or mould_row.get('associated_products')))}")
+            st.markdown(f"**Status / 状态:** {escape(_readonly_value(mould_row.get('computed_status') or mould_row.get('status')))}")
+            st.markdown(f"**Location / 位置:** {escape(_readonly_value(mould_row.get('computed_location') or mould_row.get('storage_location')))}")
+            notes = str(mould_row.get("notes") or "").strip()
+            if notes:
+                st.markdown("**Mould Notes / 模具备注**")
+                st.info(notes)
+        else:
+            st.info("No mould snapshot published yet. Ask office PC to run publish-only sync. / 云端暂未发布该模具资料。")
+
+        if setting_row:
+            st.markdown("---")
+            st.markdown(
+                f"**Machine Parameter / 机器参数:** Machine {escape(machine_text or '-')}  "
+                f"**Version:** V{escape(_readonly_value(setting_row.get('version')))}"
+            )
+            if setting_row.get("cycle_time_seconds") not in {None, ""}:
+                st.markdown(f"**Cycle Time / 周期:** {escape(str(setting_row.get('cycle_time_seconds')))} s")
+            setting_notes = str(setting_row.get("notes") or "").strip()
+            if setting_notes:
+                st.markdown("**Parameter Notes / 参数备注**")
+                st.info(setting_notes)
+
+            injection_rows = _summary_table_rows(setting_row.get("injection_summary"), ["stage", "pressure", "speed", "position"])
+            if injection_rows:
+                st.markdown("**Injection / 注塑**")
+                st.table(injection_rows)
+            holding_rows = _summary_table_rows(setting_row.get("holding_summary"), ["stage", "pressure", "speed", "time"])
+            if holding_rows:
+                st.markdown("**Holding / 保压**")
+                st.table(holding_rows)
+            temp = setting_row.get("temperature_summary")
+            if isinstance(temp, dict) and any(value not in {None, ""} for value in temp.values()):
+                st.markdown("**Temperature / 温度**")
+                st.table(
+                    [
+                        {
+                            "Nozzle": temp.get("nozzle"),
+                            "Barrel 1": temp.get("barrel_1"),
+                            "Barrel 2": temp.get("barrel_2"),
+                            "Barrel 3": temp.get("barrel_3"),
+                            "Barrel 4": temp.get("barrel_4"),
+                        }
+                    ]
+                )
+        else:
+            st.caption("No mould-machine parameter snapshot for this machine yet. / 该机器暂无模具参数快照。")
+
+
 def machine_button_list(machines: list[dict]) -> None:
     links = []
     for machine in machines:
@@ -2629,6 +2707,7 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         settings_by_pair = {}
     st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
     machine_card(selected[0], moulds_by_number, settings_by_pair)
+    render_readonly_mould_info(selected[0], moulds_by_number, settings_by_pair)
     if query_value("production_change", "").strip() in {"1", "true", "yes"}:
         report_production_change_form(settings, selected[0])
         return

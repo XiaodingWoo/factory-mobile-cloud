@@ -372,6 +372,45 @@ def inject_css() -> None:
             color: #111827;
             font-weight: 500;
         }
+        .mould-note-cloud {
+            margin-top: 0.65rem;
+            border: 1px solid #d8e3f3;
+            border-radius: 10px;
+            background: #ffffff;
+            overflow: hidden;
+        }
+        .mould-note-cloud summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 0.55rem 0.62rem;
+            color: #1e3a8a;
+            background: #eff6ff;
+            font-weight: 850;
+            border-bottom: 1px solid #d8e3f3;
+        }
+        .mould-note-cloud summary::-webkit-details-marker {
+            display: none;
+        }
+        .mould-note-section {
+            padding: 0.55rem 0.62rem;
+            border-bottom: 1px solid #e5edf7;
+        }
+        .mould-note-section:last-child {
+            border-bottom: 0;
+        }
+        .mould-note-section-title {
+            color: #5f6878;
+            font-size: 0.86rem;
+            font-weight: 820;
+            margin-bottom: 0.2rem;
+        }
+        .mould-note-section-body {
+            color: #172033;
+            font-size: 1rem;
+            font-weight: 650;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
         .notes-packaging {
             background: #dbeafe;
             color: #1d4ed8;
@@ -1335,6 +1374,65 @@ def load_public_moulds(settings: MobileCloudSettings) -> list[dict]:
     return response.data or []
 
 
+def load_public_mould_machine_settings(settings: MobileCloudSettings) -> list[dict]:
+    client = mobile_cloud_client(settings)
+    response = client.table("mobile_public_mould_machine_settings").select("*").eq("is_active", True).execute()
+    return response.data or []
+
+
+def mould_snapshot_lookup(moulds: list[dict]) -> dict[str, dict]:
+    return {
+        str(mould.get("mould_number") or "").strip().casefold(): mould
+        for mould in moulds
+        if str(mould.get("mould_number") or "").strip()
+    }
+
+
+def mould_setting_lookup(settings_rows: list[dict]) -> dict[tuple[str, str], dict]:
+    return {
+        (
+            str(row.get("mould_number") or "").strip().casefold(),
+            str(row.get("machine_id") or "").strip().casefold(),
+        ): row
+        for row in settings_rows
+        if str(row.get("mould_number") or "").strip() and str(row.get("machine_id") or "").strip()
+    }
+
+
+def cloud_mould_note_block(
+    mould_number: object,
+    machine_id: object,
+    moulds_by_number: dict[str, dict] | None = None,
+    settings_by_pair: dict[tuple[str, str], dict] | None = None,
+) -> str:
+    mould_text = str(mould_number or "").strip()
+    machine_text = str(machine_id or "").strip()
+    if not mould_text:
+        return ""
+    mould_row = (moulds_by_number or {}).get(mould_text.casefold(), {})
+    setting_row = (settings_by_pair or {}).get((mould_text.casefold(), machine_text.casefold()), {})
+    sections: list[tuple[str, str]] = []
+    mould_note = str(mould_row.get("notes") or "").strip()
+    setting_note = str(setting_row.get("notes") or "").strip()
+    if mould_note:
+        sections.append(("Mould notes / 模具备注", mould_note))
+    if setting_note:
+        sections.append((f"Parameter notes for Machine {machine_text} / 机器参数备注", setting_note))
+    if not sections:
+        return ""
+    section_html = "".join(
+        f'<div class="mould-note-section"><div class="mould-note-section-title">{escape(title)}</div>'
+        f'<div class="mould-note-section-body">{escape(body)}</div></div>'
+        for title, body in sections
+    )
+    return (
+        '<details class="mould-note-cloud">'
+        '<summary>Click to show mould note / 点击查看模具备注</summary>'
+        f'{section_html}'
+        '</details>'
+    )
+
+
 def reset_stock_request() -> None:
     st.session_state["stock_client_request_id"] = str(uuid4())
     st.session_state["stock_request_success"] = None
@@ -2231,7 +2329,7 @@ def stale_minutes(updated_at: object) -> int | None:
     return int((datetime.now(timezone.utc) - parsed).total_seconds() // 60)
 
 
-def machine_card(machine: dict) -> None:
+def machine_card(machine: dict, moulds_by_number: dict[str, dict] | None = None, settings_by_pair: dict[tuple[str, str], dict] | None = None) -> None:
     machine_id = escape(str(machine.get("machine_id") or "-"))
     product_name = escape(str(machine.get("product_name") or machine.get("running_product") or t("machine.no_plan")))
     product_code = escape(str(machine.get("product_code") or "-"))
@@ -2242,6 +2340,7 @@ def machine_card(machine: dict) -> None:
     visible_status = status_display(status)
     status_css = status_class(status)
     notes_block = mobile_production_notes_table(machine)
+    mould_note_block = cloud_mould_note_block(machine.get("mould_number"), machine.get("machine_id"), moulds_by_number, settings_by_pair)
     raw_updated_at = machine.get("updated_at")
     updated_at = format_updated_at(raw_updated_at)
     minutes_old = stale_minutes(raw_updated_at)
@@ -2274,6 +2373,7 @@ def machine_card(machine: dict) -> None:
             </div>
             <div class="label">{escape(t("machine.mould_number"))}</div>
             <div class="value">{mould_number}</div>
+            {mould_note_block}
             <div class="label">{escape(t("machine.material"))}</div>
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
@@ -2286,7 +2386,7 @@ def machine_card(machine: dict) -> None:
     )
 
 
-def production_item_card(item: dict) -> None:
+def production_item_card(item: dict, moulds_by_number: dict[str, dict] | None = None, settings_by_pair: dict[tuple[str, str], dict] | None = None) -> None:
     status = str(item.get("status") or "No Plan")
     status_css = status_class(status)
     planned = int(float(item.get("planned_qty") or 0))
@@ -2299,6 +2399,7 @@ def production_item_card(item: dict) -> None:
     material = escape(str(item.get("material") or "-"))
     colour = escape(str(item.get("colour_masterbatch") or "-"))
     notes_block = mobile_production_notes_table(item)
+    mould_note_block = cloud_mould_note_block(item.get("mould_number"), item.get("machine_id"), moulds_by_number, settings_by_pair)
     st.markdown(
         f"""
         <div class="public-card {status_css}">
@@ -2318,6 +2419,7 @@ def production_item_card(item: dict) -> None:
             </div>
             <div class="label">{escape(t("machine.mould_number"))}</div>
             <div class="value">{mould_number}</div>
+            {mould_note_block}
             <div class="label">{escape(t("machine.material"))}</div>
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
@@ -2514,8 +2616,16 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         st.error(t("machine.not_found", machine_id=requested_machine_id))
         machine_button_list(machines)
         return
+    moulds_by_number: dict[str, dict] = {}
+    settings_by_pair: dict[tuple[str, str], dict] = {}
+    try:
+        moulds_by_number = mould_snapshot_lookup(load_public_moulds(settings))
+        settings_by_pair = mould_setting_lookup(load_public_mould_machine_settings(settings))
+    except Exception:
+        moulds_by_number = {}
+        settings_by_pair = {}
     st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
-    machine_card(selected[0])
+    machine_card(selected[0], moulds_by_number, settings_by_pair)
     if query_value("production_change", "").strip() in {"1", "true", "yes"}:
         report_production_change_form(settings, selected[0])
         return
@@ -2537,7 +2647,7 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
     if machine_items:
         st.subheader(t("machine.production_items"))
         for item in machine_items:
-            production_item_card(item)
+            production_item_card(item, moulds_by_number, settings_by_pair)
 
 
 def moulds_page(settings: MobileCloudSettings) -> None:

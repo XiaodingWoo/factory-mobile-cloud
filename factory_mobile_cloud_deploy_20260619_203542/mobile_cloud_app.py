@@ -53,7 +53,7 @@ st.set_page_config(
 )
 
 
-CLOUD_ENV_NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "MOBILE_PIN", "DEBUG_SUPABASE")
+CLOUD_ENV_NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "MOBILE_PIN", "TECH_MANAGER_PIN", "MOULD_MANAGER_PIN", "DEBUG_SUPABASE")
 MACHINE_REQUIRED_COLUMNS = [
     "machine_id",
     "machine_name",
@@ -1197,6 +1197,8 @@ def normalize_mobile_page(page: str) -> str:
         return "machine_status"
     if value in {"stock", "stock_in", "stock-in"}:
         return "stock_in"
+    if value in {"mould", "moulds", "mould_management", "mould_manager"}:
+        return "moulds" if value != "mould" else "mould"
     return str(page or "stock_in").strip() or "stock_in"
 
 
@@ -1255,6 +1257,26 @@ def require_pin(mobile_pin: str) -> bool:
     if submitted:
         if pin == mobile_pin:
             st.session_state["mobile_pin_ok"] = True
+            st.rerun()
+        else:
+            st.error(t("pin.incorrect"))
+    return False
+
+
+def require_tech_manager_pin(settings: MobileCloudSettings) -> bool:
+    if st.session_state.get("tech_manager_pin_ok"):
+        return True
+    tech_pin = str(getattr(settings, "tech_manager_pin", "") or "").strip()
+    if not tech_pin:
+        st.error("TECH_MANAGER_PIN is not configured. Add it in Streamlit Cloud secrets before enabling cloud mould management.")
+        return False
+    st.title("Mould Manager / 模具管理")
+    with st.form("tech_manager_pin_form"):
+        pin = st.text_input("Technical manager PIN / 技术经理 PIN", type="password", placeholder="Enter technical manager PIN")
+        submitted = st.form_submit_button(t("common.continue"))
+    if submitted:
+        if pin == tech_pin:
+            st.session_state["tech_manager_pin_ok"] = True
             st.rerun()
         else:
             st.error(t("pin.incorrect"))
@@ -1333,6 +1355,18 @@ def current_request_id() -> str:
 def reset_production_change_request() -> None:
     st.session_state["production_change_client_request_id"] = str(uuid4())
     st.session_state["production_change_success"] = None
+
+
+def reset_mould_change_request() -> None:
+    st.session_state["mould_change_client_request_id"] = str(uuid4())
+    st.session_state["mould_change_success"] = None
+    st.session_state["mould_change_last_submitted_id"] = ""
+
+
+def mould_change_request_id() -> str:
+    if not st.session_state.get("mould_change_client_request_id"):
+        reset_mould_change_request()
+    return str(st.session_state["mould_change_client_request_id"])
 
 
 def production_change_request_id() -> str:
@@ -1490,6 +1524,44 @@ def resolved_pallet_qty(item: dict, products_by_code: dict[str, int]) -> int | N
     if code and code in products_by_code:
         return products_by_code[code]
     return valid_pallet_qty(item.get("pallet_qty"))
+
+
+
+def format_local_datetime(value: object) -> str:
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.astimezone(ZoneInfo("Australia/Perth")).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(value)
+
+
+def submit_mould_change_request(settings: MobileCloudSettings, payload: dict[str, object]) -> bool:
+    request_id = mould_change_request_id()
+    if st.session_state.get("mould_change_last_submitted_id") == request_id:
+        st.warning("This mould request was already submitted. It will not be duplicated.")
+        return False
+    payload = {**payload, "client_request_id": request_id, "source": "cloud_mobile", "status": "pending"}
+    try:
+        mobile_cloud_client(settings).table("mould_change_requests").insert(payload, returning=ReturnMethod.minimal).execute()
+        st.session_state["mould_change_last_submitted_id"] = request_id
+        st.session_state["mould_change_success"] = {
+            "client_request_id": request_id,
+            "request_type": payload.get("request_type", ""),
+            "mould_number": payload.get("mould_number", ""),
+        }
+        return True
+    except Exception as exc:
+        if duplicate_error(exc):
+            st.warning("This mould request was already received and will not be duplicated.")
+            return False
+        show_supabase_diagnostic("Mould request failed. Ask admin to run the mould cloud migration SQL.", exc)
+        return False
+
+
+def mould_value_card(label: str, value: object) -> str:
+    return f'<div class="label">{escape(str(label or ""))}</div><div class="value">{escape(str(value or "-"))}</div>'
 
 
 def request_type_label(mode: str) -> str:
@@ -2469,50 +2541,163 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
 
 
 def moulds_page(settings: MobileCloudSettings) -> None:
-    st.title(t("moulds.title"))
+    st.title("Moulds / 模具")
     try:
         moulds = load_public_moulds(settings)
-    except Exception:
-        st.error(t("moulds.load_error"))
+    except Exception as exc:
+        show_supabase_diagnostic(t("moulds.load_error"), exc)
         return
-    keyword = st.text_input(t("moulds.search"))
+    if not moulds:
+        st.info("No mould snapshot found. Run the sync worker or publish-only sync from the factory computer.")
+        return
+    keyword = st.text_input("Search mould / 搜索模具", placeholder="15L, Bucket, MG-001")
+    statuses = sorted({str(m.get("computed_status") or m.get("status") or "") for m in moulds if str(m.get("computed_status") or m.get("status") or "").strip()})
     all_label = t("moulds.all")
-    status_filter = st.selectbox(t("common.status"), [all_label, *sorted({str(m.get("status") or "") for m in moulds})])
+    status_filter = st.selectbox(t("common.status"), [all_label, *statuses])
     issue_only = st.checkbox(t("moulds.issues_only"))
+    shown = 0
     for mould in moulds:
-        if keyword and keyword.casefold() not in str(mould.get("mould_number") or "").casefold():
+        search_blob = " ".join(
+            str(mould.get(field) or "")
+            for field in ["mould_number", "mould_name", "mould_type", "mould_size", "mould_series", "associated_products", "notes"]
+        ).casefold()
+        if keyword and keyword.casefold() not in search_blob:
             continue
-        if status_filter != all_label and mould.get("status") != status_filter:
+        display_status = str(mould.get("computed_status") or mould.get("status") or "")
+        if status_filter != all_label and display_status != status_filter:
             continue
         if issue_only and not str(mould.get("issue_description") or "").strip():
             continue
+        shown += 1
+        if shown > 50:
+            st.warning("Showing first 50 results. Add more search text to narrow the list.")
+            break
         number = escape(str(mould.get("mould_number") or "-"))
+        name = escape(str(mould.get("mould_name") or mould.get("associated_products") or "-"))
         query = url_with_lang("mould", mould_number=mould.get("mould_number"))
         st.markdown(
-            f'<div class="public-card"><div class="machine-id">{number}</div>'
-            f'<div class="label">{escape(t("common.location"))}</div><div class="value">{escape(str(mould.get("storage_location") or "-"))}</div>'
-            f'<div class="label">{escape(t("common.status"))}</div><div class="value">{escape(str(mould.get("status") or "-"))}</div>'
-            f'<div class="label">{escape(t("common.issue"))}</div><div class="value">{escape(str(mould.get("issue_description") or "-"))}</div>'
-            f'<a href="{escape(query)}">{escape(t("moulds.details"))}</a></div>',
+            f'<div class="public-card">'
+            f'<div class="machine-id">{number}</div>'
+            f'<div class="product-title">{name}</div>'
+            f'{mould_value_card("Status / 状态", display_status or "-")}'
+            f'{mould_value_card("Location / 位置", mould.get("computed_location") or mould.get("storage_location") or "-")}'
+            f'{mould_value_card("Notes / 备注", mould.get("notes") or "-")}'
+            f'<a class="machine-button" href="{escape(query)}">{escape(t("moulds.details"))}</a>'
+            f'</div>',
             unsafe_allow_html=True,
         )
+    if shown == 0:
+        st.info("No moulds match the current filter.")
 
 
 def mould_detail_page(settings: MobileCloudSettings) -> None:
     number = query_value("mould_number", "")
-    moulds = load_public_moulds(settings)
+    try:
+        moulds = load_public_moulds(settings)
+    except Exception as exc:
+        show_supabase_diagnostic(t("moulds.load_error"), exc)
+        return
     selected = next((m for m in moulds if str(m.get("mould_number")) == number), None)
     if not selected:
         st.error(t("moulds.not_found"))
         return
     st.title(f"{t('common.mould')} {number}")
-    for label, field in [
-        (t("common.location"), "storage_location"), (t("common.status"), "status"),
-        (t("common.issue"), "issue_description"), (t("common.products"), "associated_products"),
-        (t("common.updated"), "updated_at"),
-    ]:
-        st.markdown(f"**{label}**  \n{selected.get(field) or '-'}")
-    st.info(t("moulds.archive_info"))
+    st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("moulds"))}">Back to mould list / 返回模具列表</a>', unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div class="public-card">'
+        f'<div class="machine-id">{escape(str(selected.get("mould_number") or "-"))}</div>'
+        f'{mould_value_card("Mould name / 模具名称", selected.get("mould_name") or selected.get("associated_products") or "-")}'
+        f'{mould_value_card("Type / 类型", selected.get("mould_type") or "-")}'
+        f'{mould_value_card("Size / 尺寸", selected.get("mould_size") or "-")}'
+        f'{mould_value_card("Series / 系列", selected.get("mould_series") or "-")}'
+        f'{mould_value_card("Status / 状态", selected.get("computed_status") or selected.get("status") or "-")}'
+        f'{mould_value_card("Location / 位置", selected.get("computed_location") or selected.get("storage_location") or "-")}'
+        f'{mould_value_card("Products / 产品", selected.get("associated_products") or "-")}'
+        f'{mould_value_card("Notes / 注意事项", selected.get("notes") or "-")}'
+        f'{mould_value_card("Updated / 更新时间", format_local_datetime(selected.get("updated_at")))}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    success = st.session_state.get("mould_change_success")
+    if success:
+        st.success(
+            f"Mould request submitted. ID: {success.get('client_request_id')}. "
+            "Pending - waiting for factory computer sync."
+        )
+        if st.button("Create another mould request / 继续提交模具请求"):
+            reset_mould_change_request()
+            st.rerun()
+        return
+
+    st.subheader("Technical manager actions / 技术经理操作")
+    action = st.radio(
+        "Action / 操作",
+        ["Update notes / 修改备注", "Add maintenance record / 新增维修记录", "Mark maintenance completed / 标记维修完成"],
+    )
+    submitted_by = st.text_input("Submitted by / 提交人", placeholder="Technical manager name")
+    if action.startswith("Update notes"):
+        with st.form("mould_update_notes_form"):
+            note = st.text_area("Mould notes / 模具注意事项", value=str(selected.get("notes") or ""), height=140)
+            submit = st.form_submit_button("Submit note update / 提交备注修改")
+        if submit:
+            if not submitted_by.strip():
+                st.error("Submitted by is required.")
+                return
+            if submit_mould_change_request(
+                settings,
+                {
+                    "request_type": "update_notes",
+                    "mould_number": number,
+                    "note": note.strip(),
+                    "submitted_by": submitted_by.strip(),
+                },
+            ):
+                st.rerun()
+    elif action.startswith("Add maintenance"):
+        with st.form("mould_add_maintenance_form"):
+            technician = st.text_input("Technician name / 维修人员", value=submitted_by)
+            content = st.text_area("Maintenance content / 维修内容", height=150)
+            set_maintenance = st.checkbox("Set mould to maintenance / 将模具标记为维修中", value=True)
+            submit = st.form_submit_button("Submit maintenance / 提交维修记录")
+        if submit:
+            if not submitted_by.strip() or not technician.strip() or not content.strip():
+                st.error("Submitted by, technician, and maintenance content are required.")
+                return
+            if submit_mould_change_request(
+                settings,
+                {
+                    "request_type": "add_maintenance",
+                    "mould_number": number,
+                    "technician_name": technician.strip(),
+                    "maintenance_content": content.strip(),
+                    "set_maintenance": set_maintenance,
+                    "submitted_by": submitted_by.strip(),
+                },
+            ):
+                st.rerun()
+    else:
+        with st.form("mould_complete_maintenance_form"):
+            note = st.text_area("Completion note / 完成备注", height=120)
+            submit = st.form_submit_button("Submit completion / 提交维修完成")
+        if submit:
+            if not submitted_by.strip():
+                st.error("Submitted by is required.")
+                return
+            if submit_mould_change_request(
+                settings,
+                {
+                    "request_type": "complete_maintenance",
+                    "mould_number": number,
+                    "note": note.strip(),
+                    "submitted_by": submitted_by.strip(),
+                },
+            ):
+                st.rerun()
+
+    st.info("Cloud mould changes are requests. The factory computer sync worker applies them to Excel, then republishes the mould snapshot.")
+
     st.subheader(t("issue.report"))
     issue_types = ["Mould Damage", "Product Defect", "Water Line", "Air Line", "Installation", "Maintenance", "Other"]
     issue_type = st.selectbox(t("issue.type"), issue_types, format_func=lambda value: t(f"issue.{value}"))
@@ -2589,10 +2774,10 @@ def main() -> None:
     if page == "machine_status":
         machine_status_page(settings)
     elif page == "moulds":
-        if require_pin(settings.mobile_pin):
+        if require_tech_manager_pin(settings):
             moulds_page(settings)
     elif page == "mould":
-        if require_pin(settings.mobile_pin):
+        if require_tech_manager_pin(settings):
             mould_detail_page(settings)
     else:
         if not require_pin(settings.mobile_pin):

@@ -16,6 +16,7 @@ class MobileCloudSettings:
     url: str
     anon_key: str
     mobile_pin: str
+    tech_manager_pin: str = ""
 
 
 def load_mobile_cloud_settings() -> MobileCloudSettings:
@@ -24,6 +25,7 @@ def load_mobile_cloud_settings() -> MobileCloudSettings:
         url=os.getenv("SUPABASE_URL", "").strip(),
         anon_key=os.getenv("SUPABASE_ANON_KEY", "").strip(),
         mobile_pin=os.getenv("MOBILE_PIN", "").strip(),
+        tech_manager_pin=os.getenv("TECH_MANAGER_PIN", "").strip() or os.getenv("MOULD_MANAGER_PIN", "").strip(),
     )
 
 

@@ -1313,6 +1313,39 @@ def inject_css() -> None:
             }
             h1 { font-size: 1.38rem !important; }
         }
+        .production-notes-table th.notes-packaging,
+        .production-notes-table td.notes-packaging,
+        .production-notes-group.notes-packaging,
+        .notes-packaging {
+            background-color: #DCEEFF !important;
+            color: #075985 !important;
+            border-color: #93C5FD !important;
+        }
+        .production-notes-table th.notes-spec,
+        .production-notes-table td.notes-spec,
+        .production-notes-group.notes-spec,
+        .notes-spec {
+            background-color: #DCFCE7 !important;
+            color: #166534 !important;
+            border-color: #86EFAC !important;
+        }
+        .production-notes-table th.notes-protection,
+        .production-notes-table td.notes-protection,
+        .production-notes-group.notes-protection,
+        .notes-protection {
+            background-color: #FEF3C7 !important;
+            color: #92400E !important;
+            border-color: #FDE68A !important;
+        }
+        .production-notes-table th.notes-packaging *,
+        .production-notes-table td.notes-packaging *,
+        .production-notes-table th.notes-spec *,
+        .production-notes-table td.notes-spec *,
+        .production-notes-table th.notes-protection *,
+        .production-notes-table td.notes-protection * {
+            color: inherit !important;
+            -webkit-text-fill-color: inherit !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1484,14 +1517,23 @@ def mould_snapshot_lookup(moulds: list[dict]) -> dict[str, dict]:
     }
 
 
+def normalize_machine_key(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    if text.startswith("machine "):
+        text = text.replace("machine ", "", 1).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
 def mould_setting_lookup(settings_rows: list[dict]) -> dict[tuple[str, str], dict]:
     return {
         (
             str(row.get("mould_number") or "").strip().casefold(),
-            str(row.get("machine_id") or "").strip().casefold(),
+            normalize_machine_key(row.get("machine_id")),
         ): row
         for row in settings_rows
-        if str(row.get("mould_number") or "").strip() and str(row.get("machine_id") or "").strip()
+        if str(row.get("mould_number") or "").strip() and normalize_machine_key(row.get("machine_id"))
     }
 
 
@@ -2769,8 +2811,22 @@ def render_readonly_mould_info(
     machine_text = str(record.get("machine_id") or "").strip()
     if not mould_text:
         return
-    mould_row = (moulds_by_number or {}).get(mould_text.casefold(), {})
-    setting_row = (settings_by_pair or {}).get((mould_text.casefold(), machine_text.casefold()), {})
+    mould_key = mould_text.casefold()
+    machine_key = normalize_machine_key(machine_text)
+    mould_row = (moulds_by_number or {}).get(mould_key, {})
+    setting_row = (settings_by_pair or {}).get((mould_key, machine_key), {})
+    fallback_setting_row = next(
+        (
+            row
+            for (row_mould, _row_machine), row in (settings_by_pair or {}).items()
+            if row_mould == mould_key
+        ),
+        {},
+    )
+    used_fallback_setting = False
+    if not setting_row and fallback_setting_row:
+        setting_row = fallback_setting_row
+        used_fallback_setting = True
     with st.expander(f"View mould info and core parameters / 查看模具信息和核心参数 - {mould_text}", expanded=False):
         st.caption("Read only / 只读显示")
         mould_items = [
@@ -2793,15 +2849,19 @@ def render_readonly_mould_info(
             st.info("No mould snapshot published yet. Ask office PC to run publish-only sync. / 云端暂未发布该模具资料。")
 
         if setting_row:
+            parameter_machine = setting_row.get("machine_id") or machine_text or "-"
             header = _grid_html(
                 [
-                    ("Machine / 机器", machine_text or "-", ""),
+                    ("Current machine / 当前机器", machine_text or "-", ""),
+                    ("Parameter machine / 参数机器", parameter_machine, ""),
                     ("Version / 版本", f"V{_readonly_value(setting_row.get('version'))}", ""),
                     ("Updated / 更新", format_updated_at(setting_row.get("updated_at")), ""),
                     ("Updated by / 更新人", setting_row.get("updated_by") or "-", ""),
                 ]
             )
             st.markdown(_section_html("Machine parameter snapshot / 机器参数快照", header), unsafe_allow_html=True)
+            if used_fallback_setting:
+                st.warning("No exact machine match; showing the latest snapshot for this mould. / 未匹配到当前机器，先显示该模具已有参数快照。")
             setting_notes = str(setting_row.get("notes") or "").strip()
             if setting_notes:
                 st.markdown(

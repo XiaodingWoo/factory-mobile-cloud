@@ -391,6 +391,26 @@ def inject_css() -> None:
         .mould-note-cloud summary::-webkit-details-marker {
             display: none;
         }
+        .mould-info-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 40px;
+            margin-top: 0.42rem;
+            padding: 0.42rem 0.72rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 10px;
+            background: #ffffff;
+            color: #1e3a8a !important;
+            font-size: 0.94rem;
+            font-weight: 850;
+            text-decoration: none !important;
+        }
+        .mould-info-link:hover,
+        .mould-info-link:active {
+            background: #eff6ff;
+            color: #1d4ed8 !important;
+        }
         .mould-note-section {
             padding: 0.55rem 0.62rem;
             border-bottom: 1px solid #e5edf7;
@@ -1406,30 +1426,13 @@ def cloud_mould_note_block(
     settings_by_pair: dict[tuple[str, str], dict] | None = None,
 ) -> str:
     mould_text = str(mould_number or "").strip()
-    machine_text = str(machine_id or "").strip()
-    if not mould_text:
-        return ""
-    mould_row = (moulds_by_number or {}).get(mould_text.casefold(), {})
-    setting_row = (settings_by_pair or {}).get((mould_text.casefold(), machine_text.casefold()), {})
-    sections: list[tuple[str, str]] = []
-    mould_note = str(mould_row.get("notes") or "").strip()
-    setting_note = str(setting_row.get("notes") or "").strip()
-    if mould_note:
-        sections.append(("Mould notes / 模具备注", mould_note))
-    if setting_note:
-        sections.append((f"Parameter notes for Machine {machine_text} / 机器参数备注", setting_note))
-    if not sections:
-        return ""
-    section_html = "".join(
-        f'<div class="mould-note-section"><div class="mould-note-section-title">{escape(title)}</div>'
-        f'<div class="mould-note-section-body">{escape(body)}</div></div>'
-        for title, body in sections
-    )
+    if not mould_text or mould_text == "-":
+        return '<span class="mould-info-empty"></span>'
+    query = url_with_lang("mould", mould_number=mould_text)
     return (
-        '<details class="mould-note-cloud">'
-        '<summary>Click to show mould note / 点击查看模具备注</summary>'
-        f'{section_html}'
-        '</details>'
+        f'<a class="mould-info-link" href="{escape(query)}">'
+        'View mould info / 查看模具信息'
+        '</a>'
     )
 
 

@@ -245,6 +245,25 @@ def inject_css() -> None:
             box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
         }
         .public-card { border-left: 5px solid #64748b; }
+        .weight-panel {
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
+            border-radius: 12px;
+            padding: 0.75rem;
+            margin: 0.75rem 0;
+        }
+        .weight-panel .label {
+            color: #475569;
+            font-size: 0.96rem;
+            font-weight: 800;
+            margin-bottom: 0.35rem;
+        }
+        .weight-panel .value {
+            color: #172033;
+            font-size: 1rem;
+            font-weight: 750;
+            line-height: 1.35;
+        }
         .public-card.status-running { border-left-color: #16a34a; }
         .public-card.status-paused, .public-card.status-stopped, .public-card.status-finished {
             border-left-color: #dc2626;
@@ -1691,6 +1710,51 @@ def number_display(value: object) -> str:
     return f"{number:,.2f}"
 
 
+def numeric_value(value: object) -> float:
+    try:
+        return float(str(value or "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def format_g_per_piece(value: object) -> str:
+    number = numeric_value(value)
+    if not number:
+        return "Not set / 未设置"
+    return f"{number:,.0f} g/pc" if number.is_integer() else f"{number:,.1f} g/pc"
+
+
+def format_total_kg(unit_g: float, quantity: object) -> str:
+    qty = numeric_value(quantity)
+    if not unit_g or not qty:
+        return "Not set / 未设置"
+    return f"{unit_g * qty / 1000:,.2f} kg"
+
+
+def note_number(record: dict, parsed_notes: dict[str, str], field_names: list[str], note_names: list[str]) -> float:
+    text = note_value(record, parsed_notes, field_names, note_names)
+    return numeric_value(text)
+
+
+def mobile_weight_summary_html(record: dict) -> str:
+    parsed = note_pairs_from_text(record.get("notes"))
+    material_g = note_number(record, parsed, ["material_weight_g", "MaterialWeightG"], ["Material Weight (g/pc)", "Material Weight (g)"])
+    masterbatch_g = note_number(record, parsed, ["masterbatch_weight_g", "MasterbatchWeightG"], ["Masterbatch Weight (g/pc)", "Masterbatch Weight (g)"])
+    unit_g = note_number(record, parsed, ["unit_weight_g", "UnitWeightG"], ["Unit Total Weight (g/pc)", "Unit Weight (g/pc)", "Unit Weight (g)"])
+    if not unit_g:
+        unit_g = material_g + masterbatch_g
+    planned_qty = record.get("planned_qty") or 0
+    return (
+        '<div class="weight-panel">'
+        '<div class="label">Product Weight / 产品重量</div>'
+        f'<div class="value">Material / 主料: {escape(format_g_per_piece(material_g))}</div>'
+        f'<div class="value">Masterbatch / 色母: {escape(format_g_per_piece(masterbatch_g))}</div>'
+        f'<div class="value">Unit Total / 单件总重: {escape(format_g_per_piece(unit_g))}</div>'
+        f'<div class="value">Total Weight / 总重量: {escape(format_total_kg(unit_g, planned_qty))}</div>'
+        '</div>'
+    )
+
+
 def item_remaining_qty(item: dict) -> float:
     try:
         planned = float(item.get("planned_qty") or 0)
@@ -2339,6 +2403,16 @@ def note_value(record: dict, parsed_notes: dict[str, str], field_names: list[str
     return ""
 
 
+def additional_packaging_note_value(record: dict, parsed_notes: dict[str, str]) -> str:
+    value = note_value(
+        record,
+        parsed_notes,
+        ["additional_packaging", "AdditionalPackaging"],
+        ["Additional Packaging", "Extra Pack", "Extra"],
+    )
+    return value or "N/A"
+
+
 def mobile_production_notes_table(record: dict) -> str:
     parsed = note_pairs_from_text(record.get("notes"))
     pallet_qty = note_value(
@@ -2355,7 +2429,7 @@ def mobile_production_notes_table(record: dict) -> str:
             "notes-packaging",
             [
                 ("Packaging Type (Type)", note_value(record, parsed, ["packaging_type", "PackagingType"], ["Packaging Type", "Type"])),
-                ("Packaging (Packaging)", note_value(record, parsed, ["packaging_unit", "PackagingUnit"], ["Packaging", "Packaging Unit"])),
+                ("Packaging (Packaging)", additional_packaging_note_value(record, parsed)),
             ],
         ),
         (
@@ -2378,7 +2452,6 @@ def mobile_production_notes_table(record: dict) -> str:
             [
                 ("Wrap Pallet", note_value(record, parsed, ["wrap_pallet", "WrapPallet"], ["Wrap Pallet", "Wrap"])),
                 ("Corner Protector", note_value(record, parsed, ["corner_protector", "CornerProtector"], ["Corner Protector", "Corner"])),
-                ("Extra", note_value(record, parsed, ["additional_packaging", "AdditionalPackaging"], ["Additional Packaging", "Extra Pack", "Extra"])),
             ],
         ),
     ]
@@ -2497,6 +2570,7 @@ def machine_card(machine: dict, moulds_by_number: dict[str, dict] | None = None,
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
             <div class="value">{colour}</div>
+            {mobile_weight_summary_html(machine)}
             {notes_block}
             {stale_block}
         </div>
@@ -2541,6 +2615,7 @@ def production_item_card(item: dict, moulds_by_number: dict[str, dict] | None = 
             <div class="value">{material}</div>
             <div class="label">{escape(t("machine.colour"))}</div>
             <div class="value">{colour}</div>
+            {mobile_weight_summary_html(item)}
             <div class="label">{escape(t("machine.last_update"))}</div>
             <div class="value">{escape(updated_at)}</div>
             {notes_block}

@@ -392,6 +392,25 @@ def inject_css() -> None:
             color: #111827;
             font-weight: 500;
         }
+        .production-alert-note {
+            margin: 0.65rem 0.62rem;
+            padding: 0.72rem 0.78rem;
+            border: 2px solid #dc2626;
+            border-radius: 10px;
+            background: #fff1f2;
+            color: #991b1b;
+            font-weight: 850;
+            line-height: 1.42;
+            overflow-wrap: anywhere;
+        }
+        .production-alert-note .alert-title {
+            font-size: 1rem;
+            margin-bottom: 0.32rem;
+        }
+        .production-alert-note .alert-body {
+            white-space: pre-line;
+            font-size: 0.95rem;
+        }
         .mould-note-cloud {
             margin-top: 0.65rem;
             border: 1px solid #d8e3f3;
@@ -1488,7 +1507,7 @@ def load_machines(settings: MobileCloudSettings) -> list[dict]:
     client = mobile_cloud_client(settings)
     response = (
         client.table("mobile_public_machines")
-        .select(",".join(MACHINE_REQUIRED_COLUMNS))
+        .select("*")
         .eq("is_active", True)
         .order("machine_id")
         .execute()
@@ -1501,11 +1520,7 @@ def load_production_items(settings: MobileCloudSettings) -> list[dict]:
     client = mobile_cloud_client(settings)
     response = (
         client.table("mobile_public_production_items")
-        .select(
-            "schedule_id,machine_id,machine_name,sequence,status,product_code,product_name,"
-            "mould_number,material,material_location,colour_masterbatch,operator_name,notes,"
-            "planned_qty,completed_qty,pallet_qty,updated_at,is_active"
-        )
+        .select("*")
         .eq("is_active", True)
         .in_("status", ["Running", "Next", "Queued", "Planned"])
         .order("machine_id")
@@ -1738,19 +1753,18 @@ def note_number(record: dict, parsed_notes: dict[str, str], field_names: list[st
 
 def mobile_weight_summary_html(record: dict) -> str:
     parsed = note_pairs_from_text(record.get("notes"))
-    material_g = note_number(record, parsed, ["material_weight_g", "MaterialWeightG"], ["Material Weight (g/pc)", "Material Weight (g)"])
+    material_g = note_number(record, parsed, ["material_weight_g", "MaterialWeightG"], ["Main Material Weight (g/pc)", "Material Weight (g/pc)", "Material Weight (g)"])
+    second_material_g = note_number(record, parsed, ["second_material_weight_g", "SecondMaterialWeightG"], ["Second Material Weight (g/pc)", "Second Material Weight (g)"])
     masterbatch_g = note_number(record, parsed, ["masterbatch_weight_g", "MasterbatchWeightG"], ["Masterbatch Weight (g/pc)", "Masterbatch Weight (g)"])
     unit_g = note_number(record, parsed, ["unit_weight_g", "UnitWeightG"], ["Unit Total Weight (g/pc)", "Unit Weight (g/pc)", "Unit Weight (g)"])
     if not unit_g:
-        unit_g = material_g + masterbatch_g
+        unit_g = material_g + second_material_g + masterbatch_g
     planned_qty = record.get("planned_qty") or 0
     return (
         '<div class="weight-panel">'
         '<div class="label">Product Weight / 产品重量</div>'
-        f'<div class="value">Material / 主料: {escape(format_g_per_piece(material_g))}</div>'
-        f'<div class="value">Masterbatch / 色母: {escape(format_g_per_piece(masterbatch_g))}</div>'
-        f'<div class="value">Unit Total / 单件总重: {escape(format_g_per_piece(unit_g))}</div>'
-        f'<div class="value">Total Weight / 总重量: {escape(format_total_kg(unit_g, planned_qty))}</div>'
+        f'<div class="value">Unit Total Weight / 单件总重: {escape(format_g_per_piece(unit_g))}</div>'
+        f'<div class="value">Total Weight (Planned Qty) / 计划总重: {escape(format_total_kg(unit_g, planned_qty))}</div>'
         '</div>'
     )
 
@@ -2413,6 +2427,25 @@ def additional_packaging_note_value(record: dict, parsed_notes: dict[str, str]) 
     return value or "N/A"
 
 
+def mobile_production_alert_note(record: dict) -> str:
+    status = str(record.get("status") or record.get("Status") or "").strip().casefold()
+    if status != "running":
+        return ""
+    message = cloud_alert_text(record, "alert_message")
+    if not message:
+        return ""
+    title = cloud_alert_text(record, "alert_title") or "Production Change Reminder"
+    machine_id = str(record.get("machine_id") or record.get("MachineID") or "-").strip() or "-"
+    product_code = str(record.get("product_code") or record.get("ProductCode") or record.get("product_name") or "-").strip() or "-"
+    body = f"Machine {machine_id}  {product_code}\n{message}"
+    return (
+        '<div class="production-alert-note">'
+        f'<div class="alert-title">{escape(title)}</div>'
+        f'<div class="alert-body">{escape(body)}</div>'
+        '</div>'
+    )
+
+
 def mobile_production_notes_table(record: dict) -> str:
     parsed = note_pairs_from_text(record.get("notes"))
     pallet_qty = note_value(
@@ -2455,6 +2488,7 @@ def mobile_production_notes_table(record: dict) -> str:
             ],
         ),
     ]
+    alert_note = mobile_production_alert_note(record)
     rows: list[str] = []
     for group_label, group_class, pairs in sections:
         visible_pairs = [(label, value) for label, value in pairs if str(value or "").strip()]
@@ -2474,19 +2508,25 @@ def mobile_production_notes_table(record: dict) -> str:
                 f'<td class="production-notes-value">{escape(str(value))}</td>'
                 "</tr>"
             )
-    if not rows:
-        notes = str(record.get("notes") or "").strip()
+    notes = str(record.get("notes") or "").strip()
+    if not rows and not alert_note:
         if not notes:
             return ""
         return f'<div class="label">{escape(t("machine.notes"))}</div><div class="value">{escape(notes)}</div>'
+    table_block = ""
+    if rows:
+        table_block = '<table class="production-notes-table"><tbody>' + "".join(rows) + '</tbody></table>'
+    free_notes_block = ""
+    if notes and not rows:
+        free_notes_block = f'<div class="value" style="padding:0.65rem;">{escape(notes)}</div>'
     return (
         '<div class="production-notes-card">'
         f'<div class="production-notes-title">{escape(t("machine.notes"))}</div>'
-        '<table class="production-notes-table"><tbody>'
-        + "".join(rows)
-        + "</tbody></table></div>"
+        + alert_note
+        + table_block
+        + free_notes_block
+        + "</div>"
     )
-
 
 def parse_updated_at(value: object) -> datetime | None:
     text = str(value or "").strip()
@@ -2522,6 +2562,18 @@ def stale_minutes(updated_at: object) -> int | None:
         return None
     return int((datetime.now(timezone.utc) - parsed).total_seconds() // 60)
 
+
+
+def cloud_alert_text(record: dict, field_base: str) -> str:
+    lang = current_lang("en")
+    preferred = "zh" if lang.startswith("zh") else "en"
+    fallback = "en" if preferred == "zh" else "zh"
+    return str(record.get(f"{field_base}_{preferred}") or record.get(f"{field_base}_{fallback}") or "").strip()
+
+
+def render_running_change_alert_once(record: dict) -> None:
+    # Alerts now render inline inside Production Notes to avoid interrupting shop-floor users.
+    return
 
 def machine_card(machine: dict, moulds_by_number: dict[str, dict] | None = None, settings_by_pair: dict[tuple[str, str], dict] | None = None) -> None:
     machine_id = escape(str(machine.get("machine_id") or "-"))
@@ -3025,6 +3077,7 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         moulds_by_number = {}
         settings_by_pair = {}
     st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
+    render_running_change_alert_once(selected[0])
     machine_card(selected[0], moulds_by_number, settings_by_pair)
     render_readonly_mould_info(selected[0], moulds_by_number, settings_by_pair)
     if query_value("production_change", "").strip() in {"1", "true", "yes"}:

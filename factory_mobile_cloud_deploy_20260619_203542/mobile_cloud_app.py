@@ -2487,6 +2487,17 @@ def mobile_production_notes_table(record: dict) -> str:
                 ("Corner Protector", note_value(record, parsed, ["corner_protector", "CornerProtector"], ["Corner Protector", "Corner"])),
             ],
         ),
+        (
+            t("machine.notes_group_qc")
+            if t("machine.notes_group_qc") != "machine.notes_group_qc"
+            else "QC Check",
+            "notes-qc",
+            [
+                (t("machine.qc_required") if t("machine.qc_required") != "machine.qc_required" else "QC Required", note_value(record, parsed, ["qc_required", "QCRequired"], ["QC Required"])),
+                (t("machine.qc_details") if t("machine.qc_details") != "machine.qc_details" else "QC Details", note_value(record, parsed, ["qc_notes", "QCNotes"], ["QC Details"])),
+            ],
+        ),
+
     ]
     alert_note = mobile_production_alert_note(record)
     rows: list[str] = []

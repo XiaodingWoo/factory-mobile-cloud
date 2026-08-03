@@ -557,6 +557,10 @@ def inject_css() -> None:
             background: #ffedd5;
             color: #c2410c;
         }
+        .notes-qc {
+            background: #fef3c7;
+            color: #92400e;
+        }
         .machine-title {
             display: flex;
             justify-content: space-between;
@@ -1375,12 +1379,22 @@ def inject_css() -> None:
             color: #92400E !important;
             border-color: #FDE68A !important;
         }
+        .production-notes-table th.notes-qc,
+        .production-notes-table td.notes-qc,
+        .production-notes-group.notes-qc,
+        .notes-qc {
+            background-color: #FEF3C7 !important;
+            color: #92400E !important;
+            border-color: #FDE68A !important;
+        }
         .production-notes-table th.notes-packaging *,
         .production-notes-table td.notes-packaging *,
         .production-notes-table th.notes-spec *,
         .production-notes-table td.notes-spec *,
         .production-notes-table th.notes-protection *,
-        .production-notes-table td.notes-protection * {
+        .production-notes-table td.notes-protection *,
+        .production-notes-table th.notes-qc *,
+        .production-notes-table td.notes-qc * {
             color: inherit !important;
             -webkit-text-fill-color: inherit !important;
         }
@@ -2493,8 +2507,7 @@ def mobile_production_notes_table(record: dict) -> str:
             else "QC Check",
             "notes-qc",
             [
-                (t("machine.qc_required") if t("machine.qc_required") != "machine.qc_required" else "QC Required", note_value(record, parsed, ["qc_required", "QCRequired"], ["QC Required"])),
-                (t("machine.qc_details") if t("machine.qc_details") != "machine.qc_details" else "QC Details", note_value(record, parsed, ["qc_notes", "QCNotes"], ["QC Details"])),
+                (t("machine.qc_details") if t("machine.qc_details") != "machine.qc_details" else "QC Details", note_value(record, parsed, ["qc_notes", "QCNotes"], ["QC Details"]) or "N/A"),
             ],
         ),
 

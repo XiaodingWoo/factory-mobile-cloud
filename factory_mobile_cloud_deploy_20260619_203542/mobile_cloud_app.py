@@ -558,8 +558,25 @@ def inject_css() -> None:
             color: #c2410c;
         }
         .notes-qc {
-            background: #fef3c7;
-            color: #92400e;
+            background: #fff1b8;
+            color: #7c2d12;
+        }
+        .production-notes-table tr.notes-qc th,
+        .production-notes-table tr.notes-qc td {
+            background: #fff1b8 !important;
+            color: #7c2d12 !important;
+            border-color: #f97316 !important;
+            font-weight: 850;
+        }
+        .production-notes-table tr.notes-qc .production-notes-group {
+            background: #f97316 !important;
+            color: #ffffff !important;
+            border-color: #ea580c !important;
+            font-weight: 900;
+        }
+        .production-notes-table tr.notes-qc .production-notes-value {
+            color: #991b1b !important;
+            font-weight: 900;
         }
         .machine-title {
             display: flex;
@@ -1379,13 +1396,27 @@ def inject_css() -> None:
             color: #92400E !important;
             border-color: #FDE68A !important;
         }
+        .production-notes-table tr.notes-qc th,
+        .production-notes-table tr.notes-qc td,
         .production-notes-table th.notes-qc,
         .production-notes-table td.notes-qc,
         .production-notes-group.notes-qc,
         .notes-qc {
-            background-color: #FEF3C7 !important;
-            color: #92400E !important;
-            border-color: #FDE68A !important;
+            background-color: #FFF1B8 !important;
+            color: #7C2D12 !important;
+            border-color: #F97316 !important;
+            font-weight: 850 !important;
+        }
+        .production-notes-table tr.notes-qc .production-notes-group,
+        .production-notes-group.notes-qc {
+            background-color: #F97316 !important;
+            color: #FFFFFF !important;
+            border-color: #EA580C !important;
+            font-weight: 900 !important;
+        }
+        .production-notes-table tr.notes-qc .production-notes-value {
+            color: #991B1B !important;
+            font-weight: 900 !important;
         }
         .production-notes-table th.notes-packaging *,
         .production-notes-table td.notes-packaging *,
@@ -2526,7 +2557,7 @@ def mobile_production_notes_table(record: dict) -> str:
                 else ""
             )
             rows.append(
-                "<tr>"
+                f'<tr class="{group_class}">'
                 f"{group_cell}"
                 f'<td class="production-notes-field"><strong>{escape(field_label)}</strong></td>'
                 f'<td class="production-notes-value">{escape(str(value))}</td>'

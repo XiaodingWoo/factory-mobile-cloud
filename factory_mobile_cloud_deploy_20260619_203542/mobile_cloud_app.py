@@ -574,7 +574,8 @@ def inject_css() -> None:
             border-color: #ea580c !important;
             font-weight: 900;
         }
-        .production-notes-table tr.notes-qc .production-notes-value {
+        .production-notes-table tr.notes-qc .production-notes-value,
+        .production-notes-table td.production-notes-value.notes-qc {
             color: #991b1b !important;
             font-weight: 900;
         }
@@ -1414,7 +1415,8 @@ def inject_css() -> None:
             border-color: #EA580C !important;
             font-weight: 900 !important;
         }
-        .production-notes-table tr.notes-qc .production-notes-value {
+        .production-notes-table tr.notes-qc .production-notes-value,
+        .production-notes-table td.production-notes-value.notes-qc {
             color: #991B1B !important;
             font-weight: 900 !important;
         }
@@ -2559,8 +2561,8 @@ def mobile_production_notes_table(record: dict) -> str:
             rows.append(
                 f'<tr class="{group_class}">'
                 f"{group_cell}"
-                f'<td class="production-notes-field"><strong>{escape(field_label)}</strong></td>'
-                f'<td class="production-notes-value">{escape(str(value))}</td>'
+                f'<td class="production-notes-field {group_class}"><strong>{escape(field_label)}</strong></td>'
+                f'<td class="production-notes-value {group_class}">{escape(str(value))}</td>'
                 "</tr>"
             )
     notes = str(record.get("notes") or "").strip()

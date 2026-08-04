@@ -1916,6 +1916,8 @@ def request_type_label(mode: str) -> str:
 
 
 def stock_product_card(item: dict, selected: bool, pallet_qty: int | None) -> None:
+    parsed_notes = note_pairs_from_text(item.get("notes"))
+    packaging_option = packaging_option_note_value(item, parsed_notes)
     status = normalized_queue_status(item.get("status"))
     css_class = status_class(status)
     remaining = item_remaining_qty(item)
@@ -1926,6 +1928,7 @@ def stock_product_card(item: dict, selected: bool, pallet_qty: int | None) -> No
         (t("stock.product_card_remaining"), number_display(remaining), "qty-remaining"),
         (t("machine.mould_number"), str(item.get("mould_number") or "-"), ""),
         (t("machine.material"), str(item.get("material") or "-"), ""),
+        ("Packaging Option / 包装选项", packaging_option or "-", ""),
         (t("machine.colour"), str(item.get("colour_masterbatch") or "-"), ""),
         (t("stock.full_pallet_qty"), number_display(pallet_qty) if pallet_qty else "-", ""),
     ]
@@ -1951,7 +1954,7 @@ def stock_product_card(item: dict, selected: bool, pallet_qty: int | None) -> No
 def production_item_search_text(item: dict) -> str:
     return " ".join(
         str(item.get(field) or "")
-        for field in ["status", "product_code", "product_name", "mould_number", "machine_id"]
+        for field in ["status", "product_code", "product_name", "mould_number", "machine_id", "notes"]
     ).casefold()
 
 
@@ -2474,6 +2477,15 @@ def additional_packaging_note_value(record: dict, parsed_notes: dict[str, str]) 
     return value or "N/A"
 
 
+def packaging_option_note_value(record: dict, parsed_notes: dict[str, str]) -> str:
+    return note_value(
+        record,
+        parsed_notes,
+        ["packaging_option", "PackagingOption"],
+        ["Packaging Option", "PackagingOption", "Pack Option"],
+    )
+
+
 def mobile_production_alert_note(record: dict) -> str:
     status = str(record.get("status") or record.get("Status") or "").strip().casefold()
     if status != "running":
@@ -2509,6 +2521,7 @@ def mobile_production_notes_table(record: dict) -> str:
             "notes-packaging",
             [
                 ("Packaging Type (Type)", note_value(record, parsed, ["packaging_type", "PackagingType"], ["Packaging Type", "Type"])),
+                ("Packaging Option / 包装选项", packaging_option_note_value(record, parsed)),
                 ("Packaging (Packaging)", additional_packaging_note_value(record, parsed)),
             ],
         ),

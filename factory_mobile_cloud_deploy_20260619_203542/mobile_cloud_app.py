@@ -396,6 +396,47 @@ def inject_css() -> None:
             color: #111827;
             font-weight: 500;
         }
+        .production-notes-grid {
+            display: flex;
+            flex-direction: column;
+            background: #ffffff;
+        }
+        .production-notes-section {
+            border-bottom: 1px solid #e5edf7;
+            background: #ffffff;
+        }
+        .production-notes-section:last-child {
+            border-bottom: 0;
+        }
+        .production-notes-section-title {
+            padding: 0.55rem 0.65rem;
+            font-size: 0.94rem;
+            font-weight: 900;
+            line-height: 1.3;
+            border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+        }
+        .production-notes-line {
+            display: grid;
+            grid-template-columns: minmax(8.5rem, 44%) 1fr;
+            gap: 0;
+            border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+        }
+        .production-notes-line:last-child {
+            border-bottom: 0;
+        }
+        .production-notes-line .production-notes-field,
+        .production-notes-line .production-notes-value {
+            width: auto;
+            padding: 0.52rem 0.65rem;
+            overflow-wrap: anywhere;
+        }
+        .production-notes-line .production-notes-field {
+            font-weight: 850;
+            border-right: 1px solid rgba(15, 23, 42, 0.08);
+        }
+        .production-notes-line .production-notes-value {
+            font-weight: 650;
+        }
         .production-alert-note {
             margin: 0.65rem 0.62rem;
             padding: 0.72rem 0.78rem;
@@ -1377,9 +1418,23 @@ def inject_css() -> None:
             }
             h1 { font-size: 1.38rem !important; }
         }
+        @media (max-width: 480px) {
+            .production-notes-line {
+                grid-template-columns: 1fr;
+            }
+            .production-notes-line .production-notes-field {
+                border-right: 0;
+                padding-bottom: 0.12rem;
+            }
+            .production-notes-line .production-notes-value {
+                padding-top: 0.12rem;
+                font-size: 1rem;
+            }
+        }
         .production-notes-table th.notes-packaging,
         .production-notes-table td.notes-packaging,
         .production-notes-group.notes-packaging,
+        .production-notes-section.notes-packaging,
         .notes-packaging {
             background-color: #DCEEFF !important;
             color: #075985 !important;
@@ -1388,6 +1443,7 @@ def inject_css() -> None:
         .production-notes-table th.notes-spec,
         .production-notes-table td.notes-spec,
         .production-notes-group.notes-spec,
+        .production-notes-section.notes-spec,
         .notes-spec {
             background-color: #DCFCE7 !important;
             color: #166534 !important;
@@ -1396,6 +1452,7 @@ def inject_css() -> None:
         .production-notes-table th.notes-protection,
         .production-notes-table td.notes-protection,
         .production-notes-group.notes-protection,
+        .production-notes-section.notes-protection,
         .notes-protection {
             background-color: #FEF3C7 !important;
             color: #92400E !important;
@@ -1406,6 +1463,7 @@ def inject_css() -> None:
         .production-notes-table th.notes-qc,
         .production-notes-table td.notes-qc,
         .production-notes-group.notes-qc,
+        .production-notes-section.notes-qc,
         .notes-qc {
             background-color: #FFF1B8 !important;
             color: #7C2D12 !important;
@@ -1413,14 +1471,16 @@ def inject_css() -> None:
             font-weight: 850 !important;
         }
         .production-notes-table tr.notes-qc .production-notes-group,
-        .production-notes-group.notes-qc {
+        .production-notes-group.notes-qc,
+        .production-notes-section.notes-qc .production-notes-section-title {
             background-color: #F97316 !important;
             color: #FFFFFF !important;
             border-color: #EA580C !important;
             font-weight: 900 !important;
         }
         .production-notes-table tr.notes-qc .production-notes-value,
-        .production-notes-table td.production-notes-value.notes-qc {
+        .production-notes-table td.production-notes-value.notes-qc,
+        .production-notes-section.notes-qc .production-notes-value {
             color: #991B1B !important;
             font-weight: 900 !important;
         }
@@ -1431,7 +1491,8 @@ def inject_css() -> None:
         .production-notes-table th.notes-protection *,
         .production-notes-table td.notes-protection *,
         .production-notes-table th.notes-qc *,
-        .production-notes-table td.notes-qc * {
+        .production-notes-table td.notes-qc *,
+        .production-notes-section * {
             color: inherit !important;
             -webkit-text-fill-color: inherit !important;
         }
@@ -2565,41 +2626,41 @@ def mobile_production_notes_table(record: dict) -> str:
 
     ]
     alert_note = mobile_production_alert_note(record)
-    rows: list[str] = []
+    section_blocks: list[str] = []
     for group_label, group_class, pairs in sections:
         visible_pairs = [(label, value) for label, value in pairs if str(value or "").strip()]
         if not visible_pairs:
             continue
-        rowspan = len(visible_pairs)
-        for index, (field_label, value) in enumerate(visible_pairs):
-            group_cell = (
-                f'<th class="production-notes-group {group_class}" rowspan="{rowspan}">{escape(group_label)}</th>'
-                if index == 0
-                else ""
+        lines = []
+        for field_label, value in visible_pairs:
+            lines.append(
+                '<div class="production-notes-line">'
+                f'<div class="production-notes-field {group_class}"><strong>{escape(field_label)}</strong></div>'
+                f'<div class="production-notes-value {group_class}">{escape(str(value))}</div>'
+                '</div>'
             )
-            rows.append(
-                f'<tr class="{group_class}">'
-                f"{group_cell}"
-                f'<td class="production-notes-field {group_class}"><strong>{escape(field_label)}</strong></td>'
-                f'<td class="production-notes-value {group_class}">{escape(str(value))}</td>'
-                "</tr>"
-            )
+        section_blocks.append(
+            f'<section class="production-notes-section {group_class}">'
+            f'<div class="production-notes-section-title {group_class}">{escape(group_label)}</div>'
+            + "".join(lines)
+            + "</section>"
+        )
     notes = str(record.get("notes") or "").strip()
-    if not rows and not alert_note:
+    if not section_blocks and not alert_note:
         if not notes:
             return ""
         return f'<div class="label">{escape(t("machine.notes"))}</div><div class="value">{escape(notes)}</div>'
-    table_block = ""
-    if rows:
-        table_block = '<table class="production-notes-table"><tbody>' + "".join(rows) + '</tbody></table>'
+    notes_grid_block = ""
+    if section_blocks:
+        notes_grid_block = '<div class="production-notes-grid">' + "".join(section_blocks) + "</div>"
     free_notes_block = ""
-    if notes and not rows:
+    if notes and not section_blocks:
         free_notes_block = f'<div class="value" style="padding:0.65rem;">{escape(notes)}</div>'
     return (
         '<div class="production-notes-card">'
         f'<div class="production-notes-title">{escape(t("machine.notes"))}</div>'
         + alert_note
-        + table_block
+        + notes_grid_block
         + free_notes_block
         + "</div>"
     )

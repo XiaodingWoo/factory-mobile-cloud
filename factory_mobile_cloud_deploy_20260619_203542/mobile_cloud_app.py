@@ -77,6 +77,10 @@ MACHINE_REQUIRED_COLUMNS = [
 ]
 
 
+PARAMETER_PHOTO_BUCKET = "parameter-adjustment-photos"
+PARAMETER_PHOTO_MAX_FILE_MB = int(os.getenv("PARAMETER_PHOTO_MAX_FILE_MB", "8"))
+
+
 class SupabaseMachineSchemaError(RuntimeError):
     def __init__(self, missing_columns: list[str]) -> None:
         self.missing_columns = missing_columns
@@ -1450,6 +1454,8 @@ def normalize_mobile_page(page: str) -> str:
         return "machine_status"
     if value in {"stock", "stock_in", "stock-in"}:
         return "stock_in"
+    if value in {"parameter_photo", "parameter_photos", "parameter_adjustment", "parameter_adjustment_photo"}:
+        return "parameter_photo"
     if value in {"mould", "moulds", "mould_management", "mould_manager"}:
         return "moulds" if value != "mould" else "mould"
     return str(page or "stock_in").strip() or "stock_in"
@@ -3104,6 +3110,159 @@ def machine_button_list(machines: list[dict]) -> None:
     st.markdown(f'<div class="machine-button-grid">{"".join(links)}</div>', unsafe_allow_html=True)
 
 
+
+def parameter_photo_request_id() -> str:
+    if not st.session_state.get("parameter_photo_client_request_id"):
+        st.session_state["parameter_photo_client_request_id"] = str(uuid4())
+    return str(st.session_state["parameter_photo_client_request_id"])
+
+
+def reset_parameter_photo_request() -> None:
+    st.session_state["parameter_photo_client_request_id"] = str(uuid4())
+    st.session_state["parameter_photo_success"] = None
+
+
+def safe_storage_name(value: object, fallback: str = "upload") -> str:
+    text = str(value or fallback).strip() or fallback
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+    return cleaned[:120] or fallback
+
+
+def current_machine_payload(machine: dict) -> dict[str, str]:
+    return {
+        "schedule_id": str(machine.get("schedule_id") or machine.get("ScheduleID") or "").strip(),
+        "product_code": str(machine.get("product_code") or machine.get("ProductCode") or "").strip(),
+        "product_name": str(machine.get("product_name") or machine.get("running_product") or machine.get("ProductName") or "").strip(),
+        "mould_number": str(machine.get("mould_number") or machine.get("MouldNumber") or "").strip(),
+    }
+
+
+def upload_parameter_photo(client, machine_id: str, client_request_id: str, kind: str, uploaded_file) -> dict[str, object]:
+    payload = uploaded_file.getvalue()
+    limit = PARAMETER_PHOTO_MAX_FILE_MB * 1024 * 1024
+    if len(payload) > limit:
+        raise ValueError(
+            f"{uploaded_file.name} is larger than {PARAMETER_PHOTO_MAX_FILE_MB} MB. "
+            "Please retake a smaller photo."
+        )
+    safe_machine = safe_storage_name(machine_id, "machine")
+    safe_file = safe_storage_name(getattr(uploaded_file, "name", "") or f"{kind}.jpg", f"{kind}.jpg")
+    storage_path = f"{safe_machine}/{client_request_id}/{kind}_{safe_file}"
+    content_type = getattr(uploaded_file, "type", "") or "application/octet-stream"
+    client.storage.from_(PARAMETER_PHOTO_BUCKET).upload(
+        storage_path,
+        payload,
+        {"content-type": content_type, "upsert": "false"},
+    )
+    return {
+        "path": storage_path,
+        "name": safe_file,
+        "size": len(payload),
+        "mime_type": content_type,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def parameter_photo_upload_page(settings: MobileCloudSettings) -> None:
+    st.title("Upload Parameter Adjustment / 上传参数调整")
+    requested_machine_id = query_value("machine_id", "").strip()
+    try:
+        machines = load_machines(settings)
+    except Exception as exc:
+        show_supabase_diagnostic("Unable to load machine list. / 无法读取机器列表。", exc)
+        return
+    if not requested_machine_id:
+        st.caption("Choose a machine first. / 请先选择机器。")
+        machine_button_list(machines)
+        return
+    selected = [machine for machine in machines if str(machine.get("machine_id", "")).strip() == requested_machine_id]
+    if not selected:
+        st.error(f"Machine not found: {requested_machine_id}")
+        machine_button_list(machines)
+        return
+    machine = selected[0]
+    context = current_machine_payload(machine)
+    back_url = url_with_lang("machine_status", machine_id=requested_machine_id)
+    st.markdown(
+        f'<a class="machine-button" href="{escape(back_url)}">Back to machine / 返回机器</a>',
+        unsafe_allow_html=True,
+    )
+    st.info(
+        f"Machine {requested_machine_id} | "
+        f"{context.get('product_name') or context.get('product_code') or 'No running product'} | "
+        f"Mould: {context.get('mould_number') or '-'}"
+    )
+    success = st.session_state.get("parameter_photo_success")
+    if success:
+        st.success("Parameter adjustment photos uploaded. The factory PC will download them within 24 hours. / 参数调整照片已上传，工厂电脑将在 24 小时内下载。")
+        st.code(str(success.get("client_request_id") or ""))
+        if st.button("Upload another adjustment / 继续上传"):
+            reset_parameter_photo_request()
+            st.rerun()
+        return
+
+    with st.form(f"parameter_photo_form_{requested_machine_id}"):
+        uploaded_by = st.text_input("Submitted by / 上传人员", placeholder="Name")
+        problem_description = st.text_area("Problem description / 问题描述", placeholder="What was adjusted or why?")
+        before_photo = st.file_uploader(
+            "Before adjustment photo / 调整前拍照上传",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=False,
+            key=f"before_parameter_photo_{requested_machine_id}",
+        )
+        after_photo = st.file_uploader(
+            "After adjustment photo / 调整后拍照上传",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=False,
+            key=f"after_parameter_photo_{requested_machine_id}",
+        )
+        submitted = st.form_submit_button("Submit adjustment photos / 提交参数调整照片", type="primary")
+
+    if not submitted:
+        return
+    if not uploaded_by.strip():
+        st.error("Submitted by is required. / 请填写上传人员。")
+        return
+    if before_photo is None or after_photo is None:
+        st.error("Please upload both before and after photos. / 请同时上传调整前和调整后照片。")
+        return
+
+    client_request_id = parameter_photo_request_id()
+    client = mobile_cloud_client(settings)
+    try:
+        before_meta = upload_parameter_photo(client, requested_machine_id, client_request_id, "before", before_photo)
+        after_meta = upload_parameter_photo(client, requested_machine_id, client_request_id, "after", after_photo)
+        payload = {
+            "client_request_id": client_request_id,
+            "machine_id": requested_machine_id,
+            "schedule_id": context.get("schedule_id") or None,
+            "product_code": context.get("product_code") or None,
+            "product_name": context.get("product_name") or None,
+            "mould_number": context.get("mould_number") or None,
+            "problem_description": problem_description.strip() or None,
+            "before_photo_path": before_meta["path"],
+            "before_photo_name": before_meta["name"],
+            "before_photo_size": before_meta["size"],
+            "before_photo_sha256": before_meta["sha256"],
+            "after_photo_path": after_meta["path"],
+            "after_photo_name": after_meta["name"],
+            "after_photo_size": after_meta["size"],
+            "after_photo_sha256": after_meta["sha256"],
+            "uploaded_by": uploaded_by.strip(),
+            "status": "pending_download",
+            "source": "mobile",
+        }
+        client.table("parameter_photo_requests").insert(payload, returning=ReturnMethod.minimal).execute()
+        st.session_state["parameter_photo_success"] = {
+            "client_request_id": client_request_id,
+            "machine_id": requested_machine_id,
+        }
+        st.rerun()
+    except Exception as exc:
+        st.error("Upload failed. Please make sure the Supabase migration and Storage bucket are installed. / 上传失败，请确认已执行 Supabase migration 并创建 Storage bucket。")
+        if debug_supabase_enabled():
+            st.exception(exc)
+
 def machine_status_page(settings: MobileCloudSettings) -> None:
     st.title(t("machine.title"))
     try:
@@ -3147,6 +3306,11 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         moulds_by_number = {}
         settings_by_pair = {}
     st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
+    photo_url = url_with_lang("parameter_photo", machine_id=requested_machine_id)
+    st.markdown(
+        f'<a class="machine-button status-maintenance" href="{escape(photo_url)}">Upload Parameter Adjustment<br><small>上传参数调整照片</small></a>',
+        unsafe_allow_html=True,
+    )
     render_running_change_alert_once(selected[0])
     machine_card(selected[0], moulds_by_number, settings_by_pair)
     render_readonly_mould_info(selected[0], moulds_by_number, settings_by_pair)
@@ -3407,6 +3571,10 @@ def main() -> None:
         return
     if page == "machine_status":
         machine_status_page(settings)
+    elif page == "parameter_photo":
+        if not require_pin(settings.mobile_pin):
+            return
+        parameter_photo_upload_page(settings)
     elif page == "moulds":
         if require_tech_manager_pin(settings):
             moulds_page(settings)

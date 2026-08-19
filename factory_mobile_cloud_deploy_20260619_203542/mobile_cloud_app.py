@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import time
 import json
 from datetime import datetime, timezone
 from html import escape
@@ -11,7 +12,6 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
 from postgrest.types import ReturnMethod
 
 from mobile_cloud_config import (
@@ -3616,14 +3616,34 @@ def mould_detail_page(settings: MobileCloudSettings) -> None:
             st.error(t("issue.failed"))
 
 
+
+def cloud_auto_refresh_5min() -> None:
+    """Refresh the whole Streamlit app every five minutes without extra packages."""
+    fragment = getattr(st, "fragment", None)
+    if fragment is None:
+        # Keep the cloud app fully functional on older Streamlit versions.
+        # Auto-refresh is simply disabled rather than breaking Supabase reads.
+        return
+
+    @fragment(run_every=300)
+    def _refresh_timer() -> None:
+        now = time.monotonic()
+        last = st.session_state.get("_cloud_last_full_refresh_at")
+        if last is None:
+            st.session_state["_cloud_last_full_refresh_at"] = now
+            return
+        if now - float(last) >= 295:
+            # Update the timestamp before rerunning so the new full run does not loop.
+            st.session_state["_cloud_last_full_refresh_at"] = now
+            st.rerun()
+
+    _refresh_timer()
+
 def main() -> None:
-    # Keep cloud/mobile views in sync with newly published Supabase data.
-    # st_autorefresh triggers a normal Streamlit rerun (not a browser reload),
-    # so session state/PIN authentication is preserved.
-    st_autorefresh(interval=5 * 60 * 1000, key="cloud_auto_refresh_5min")
     inject_css()
     inject_shared_theme(mobile=True)
     page = normalize_mobile_page(query_value("page", "stock_in"))
+    cloud_auto_refresh_5min()
     mobile_language_bar()
     load_cloud_environment()
     settings = load_mobile_cloud_settings()

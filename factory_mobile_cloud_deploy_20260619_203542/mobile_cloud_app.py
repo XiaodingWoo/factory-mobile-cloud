@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 from postgrest.types import ReturnMethod
 
 from mobile_cloud_config import (
@@ -3616,6 +3617,10 @@ def mould_detail_page(settings: MobileCloudSettings) -> None:
 
 
 def main() -> None:
+    # Keep cloud/mobile views in sync with newly published Supabase data.
+    # st_autorefresh triggers a normal Streamlit rerun (not a browser reload),
+    # so session state/PIN authentication is preserved.
+    st_autorefresh(interval=5 * 60 * 1000, key="cloud_auto_refresh_5min")
     inject_css()
     inject_shared_theme(mobile=True)
     page = normalize_mobile_page(query_value("page", "stock_in"))

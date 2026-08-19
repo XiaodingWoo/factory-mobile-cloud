@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -12,12 +11,6 @@ import pandas as pd
 
 from data_manager import (
     ExcelWriteLockError,
-    INVENTORY_FILE,
-    MOULD_FILE,
-    MOULD_MACHINE_COMPATIBILITY_FILE,
-    MOULD_MACHINE_SETTINGS_FILE,
-    PRODUCT_CATALOG_FILE,
-    PRODUCTION_FILE,
     add_loose_goods_record,
     add_mould_maintenance_record,
     add_production_change_request,
@@ -1171,118 +1164,12 @@ def run_sync(publish_only: bool = False, force_photo_sync: bool = False) -> dict
     return results
 
 
-
-WATCH_SOURCE_FILES = (
-    PRODUCTION_FILE,
-    INVENTORY_FILE,
-    PRODUCT_CATALOG_FILE,
-    MOULD_FILE,
-    MOULD_MACHINE_COMPATIBILITY_FILE,
-    MOULD_MACHINE_SETTINGS_FILE,
-)
-
-
-def _watch_file_marker() -> tuple[tuple[str, int, int], ...]:
-    marker: list[tuple[str, int, int]] = []
-    for path in WATCH_SOURCE_FILES:
-        try:
-            stat = path.stat()
-            marker.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
-        except OSError:
-            marker.append((str(path), 0, 0))
-    return tuple(marker)
-
-
-def _table_has_pending(client, table_name: str) -> bool:
-    try:
-        response = client.table(table_name).select("id").eq("status", "pending").limit(1).execute()
-        return bool(response.data)
-    except Exception as exc:
-        LOGGER.debug("Pending check skipped for %s: %s", table_name, exc)
-        return False
-
-
-def cloud_requests_pending(client) -> bool:
-    for table_name in (
-        "stock_in_requests",
-        "production_change_requests",
-        "mould_change_requests",
-        "parameter_photo_requests",
-    ):
-        if _table_has_pending(client, table_name):
-            return True
-    return False
-
-
-def run_watch_loop(watch_interval: int = 5, full_sync_interval: int = 300) -> None:
-    watch_interval = max(int(watch_interval or 5), 2)
-    full_sync_interval = max(int(full_sync_interval or 300), 30)
-    settings = load_settings()
-    validate_worker_settings(settings)
-    client = service_client(settings)
-
-    LOGGER.info(
-        "Live sync watch started: check every %ss, fallback full sync every %ss",
-        watch_interval,
-        full_sync_interval,
-    )
-
-    # Start with one normal sync so both sides have a known baseline.
-    try:
-        run_sync()
-    except Exception:
-        LOGGER.exception("Initial live sync failed; watcher will continue retrying.")
-
-    last_marker = _watch_file_marker()
-    last_full_sync = time.monotonic()
-
-    while True:
-        try:
-            pending = cloud_requests_pending(client)
-            current_marker = _watch_file_marker()
-            local_changed = current_marker != last_marker
-            fallback_due = (time.monotonic() - last_full_sync) >= full_sync_interval
-
-            if pending:
-                LOGGER.info("Cloud change detected; syncing immediately.")
-                run_sync()
-                last_full_sync = time.monotonic()
-                last_marker = _watch_file_marker()
-            elif local_changed:
-                LOGGER.info("Local MIS data change detected; publishing cloud snapshot immediately.")
-                run_sync(publish_only=True)
-                last_marker = _watch_file_marker()
-            elif fallback_due:
-                LOGGER.info("Fallback sync interval reached; running full sync.")
-                run_sync()
-                last_full_sync = time.monotonic()
-                last_marker = _watch_file_marker()
-        except KeyboardInterrupt:
-            raise
-        except Exception:
-            LOGGER.exception("Live sync watch iteration failed; retrying after interval.")
-        time.sleep(watch_interval)
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Synchronize Supabase mobile requests into local Excel files.")
     parser.add_argument("--publish-only", action="store_true", help="Only publish public product and machine lists.")
     parser.add_argument("--check-config", action="store_true", help="Validate .env without contacting Supabase.")
     parser.add_argument("--force-photo-sync", action="store_true", help="Download pending parameter photos even if the 24-hour check already ran.")
-    parser.add_argument("--watch", action="store_true", help="Watch for cloud/local changes and sync only when data changes.")
-    parser.add_argument("--watch-interval", type=int, default=5, help="Seconds between lightweight change checks in watch mode.")
-    parser.add_argument("--full-sync-interval", type=int, default=300, help="Fallback full sync interval in seconds while watching.")
     args = parser.parse_args()
-
-    if args.watch:
-        try:
-            run_watch_loop(args.watch_interval, args.full_sync_interval)
-            return 0
-        except KeyboardInterrupt:
-            LOGGER.info("Live sync watcher stopped.")
-            return 0
-        except Exception as exc:
-            LOGGER.exception("Live sync watcher failed: %s", exc)
-            return 1
 
     try:
         settings = load_settings()

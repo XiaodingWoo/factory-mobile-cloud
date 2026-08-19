@@ -3615,48 +3615,6 @@ def mould_detail_page(settings: MobileCloudSettings) -> None:
             st.error(t("issue.failed"))
 
 
-
-
-def _latest_cloud_snapshot_marker(settings: MobileCloudSettings) -> tuple[str, str]:
-    client = mobile_cloud_client(settings)
-    values: list[str] = []
-    for table_name in ("mobile_public_production_items", "mobile_public_machines"):
-        try:
-            response = (
-                client.table(table_name)
-                .select("updated_at")
-                .order("updated_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            row = (response.data or [{}])[0]
-            values.append(str(row.get("updated_at") or ""))
-        except Exception:
-            values.append("")
-    return values[0], values[1]
-
-
-def install_cloud_live_refresh(settings: MobileCloudSettings) -> None:
-    fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
-    if fragment is None:
-        return
-
-    @fragment(run_every="5s")
-    def _watch_cloud_snapshot() -> None:
-        marker = _latest_cloud_snapshot_marker(settings)
-        state_key = "_factorymis_cloud_live_marker"
-        previous = st.session_state.get(state_key)
-        if previous is None:
-            st.session_state[state_key] = marker
-            return
-        if marker != previous:
-            st.session_state[state_key] = marker
-            load_machines.clear()
-            load_production_items.clear()
-            st.rerun()
-
-    _watch_cloud_snapshot()
-
 def main() -> None:
     inject_css()
     inject_shared_theme(mobile=True)
@@ -3672,7 +3630,6 @@ def main() -> None:
             "Configure SUPABASE_URL, SUPABASE_ANON_KEY, and MOBILE_PIN in the cloud platform environment."
         )
         return
-    install_cloud_live_refresh(settings)
     if page == "machine_status":
         machine_status_page(settings)
     elif page == "parameter_photo":

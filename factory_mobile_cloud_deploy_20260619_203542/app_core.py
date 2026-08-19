@@ -32,8 +32,6 @@ from generate_qr_codes import (
 
 from data_manager import (
     PERMISSION_COLUMNS,
-    INVENTORY_FILE,
-    PRODUCTION_FILE,
     archive_completed_production_items,
     authenticate,
     add_loose_goods_record,
@@ -5187,41 +5185,8 @@ def history_page() -> None:
             )
 
 
-
-
-def _local_live_marker() -> tuple[tuple[str, int, int], ...]:
-    marker: list[tuple[str, int, int]] = []
-    for path in (INVENTORY_FILE, PRODUCTION_FILE):
-        try:
-            stat = path.stat()
-            marker.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
-        except OSError:
-            marker.append((str(path), 0, 0))
-    return tuple(marker)
-
-
-def install_local_live_refresh() -> None:
-    fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
-    if fragment is None:
-        return
-
-    @fragment(run_every="5s")
-    def _watch_local_data() -> None:
-        marker = _local_live_marker()
-        state_key = "_factorymis_local_live_marker"
-        previous = st.session_state.get(state_key)
-        if previous is None:
-            st.session_state[state_key] = marker
-            return
-        if marker != previous:
-            st.session_state[state_key] = marker
-            st.rerun()
-
-    _watch_local_data()
-
 def main() -> None:
     inject_css()
-    install_local_live_refresh()
     inject_shared_theme()
     requested_page = query_value("page", "machine")
     machine_id = query_value("machine_id", "")

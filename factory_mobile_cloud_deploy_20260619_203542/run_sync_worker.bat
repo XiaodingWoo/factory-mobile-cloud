@@ -19,16 +19,15 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "WATCH_INTERVAL_SECONDS=5"
-set "FULL_SYNC_INTERVAL_SECONDS=300"
-echo Supabase live sync watcher started.
-echo Lightweight change check: every %WATCH_INTERVAL_SECONDS% seconds
-echo Fallback full sync: every %FULL_SYNC_INTERVAL_SECONDS% seconds
+for /f "tokens=1,* delims==" %%A in ('findstr /b "SYNC_INTERVAL_SECONDS=" .env') do set "SYNC_INTERVAL_SECONDS=%%B"
+if not defined SYNC_INTERVAL_SECONDS set "SYNC_INTERVAL_SECONDS=300"
+echo Supabase request worker started.
+echo Sync interval: %SYNC_INTERVAL_SECONDS% seconds
 echo Keep this window open.
 echo.
-"%PYTHON_EXE%" sync_supabase_requests.py --watch --watch-interval %WATCH_INTERVAL_SECONDS% --full-sync-interval %FULL_SYNC_INTERVAL_SECONDS%
-if errorlevel 1 (
-  echo.
-  echo ERROR: Live sync watcher stopped unexpectedly.
-  pause
-)
+:loop
+"%PYTHON_EXE%" sync_supabase_requests.py
+echo.
+echo Next sync in %SYNC_INTERVAL_SECONDS% seconds...
+timeout /t %SYNC_INTERVAL_SECONDS% /nobreak >nul
+goto loop

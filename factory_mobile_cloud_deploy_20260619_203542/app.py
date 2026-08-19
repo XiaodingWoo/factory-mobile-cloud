@@ -7,7 +7,6 @@ configure_streamlit()
 
 from app_core import (  # noqa: E402
     inject_css,
-    install_local_live_refresh,
     login_panel,
     public_bottom_nav,
     public_machine_overview,
@@ -58,7 +57,6 @@ def render_selected_page(page: str, machine_id: str) -> None:
 
 def main() -> None:
     inject_css()
-    install_local_live_refresh()
     inject_shared_theme()
 
     requested_page = query_value("page", DEFAULT_PAGE)

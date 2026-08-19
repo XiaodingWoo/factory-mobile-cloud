@@ -2737,7 +2737,7 @@ def apply_catalog_search_filters(catalog: pd.DataFrame, key_prefix: str, default
 def product_choice_label(row: object, index: int) -> str:
     option = packaging_option_text(row)
     option_text = f" | {t('production.packaging_option')}: {option}" if option else ""
-    return f"{index + 1}. {row.ProductDetail or row.Item}{option_text} | {row.Size or '-'} | {row.Colour or '-'} | {t('production.label_short')}: {row.HasLabel or '-'}"
+    return f"{index + 1}. {row.ProductDetail or row.Item} | {row.Size or '-'} | {row.Colour or '-'} | {t('production.label_short')}: {row.HasLabel or '-'}{option_text}"
 
 
 def forecast_review_state(review_due_date: object) -> tuple[str, str]:

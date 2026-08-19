@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import hashlib
-import time
 import json
 from datetime import datetime, timezone
 from html import escape
@@ -3617,33 +3616,51 @@ def mould_detail_page(settings: MobileCloudSettings) -> None:
 
 
 
-def cloud_auto_refresh_5min() -> None:
-    """Refresh the whole Streamlit app every five minutes without extra packages."""
-    fragment = getattr(st, "fragment", None)
+
+def _latest_cloud_snapshot_marker(settings: MobileCloudSettings) -> tuple[str, str]:
+    client = mobile_cloud_client(settings)
+    values: list[str] = []
+    for table_name in ("mobile_public_production_items", "mobile_public_machines"):
+        try:
+            response = (
+                client.table(table_name)
+                .select("updated_at")
+                .order("updated_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            row = (response.data or [{}])[0]
+            values.append(str(row.get("updated_at") or ""))
+        except Exception:
+            values.append("")
+    return values[0], values[1]
+
+
+def install_cloud_live_refresh(settings: MobileCloudSettings) -> None:
+    fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
     if fragment is None:
-        # Keep the cloud app fully functional on older Streamlit versions.
-        # Auto-refresh is simply disabled rather than breaking Supabase reads.
         return
 
-    @fragment(run_every=300)
-    def _refresh_timer() -> None:
-        now = time.monotonic()
-        last = st.session_state.get("_cloud_last_full_refresh_at")
-        if last is None:
-            st.session_state["_cloud_last_full_refresh_at"] = now
+    @fragment(run_every="5s")
+    def _watch_cloud_snapshot() -> None:
+        marker = _latest_cloud_snapshot_marker(settings)
+        state_key = "_factorymis_cloud_live_marker"
+        previous = st.session_state.get(state_key)
+        if previous is None:
+            st.session_state[state_key] = marker
             return
-        if now - float(last) >= 295:
-            # Update the timestamp before rerunning so the new full run does not loop.
-            st.session_state["_cloud_last_full_refresh_at"] = now
+        if marker != previous:
+            st.session_state[state_key] = marker
+            load_machines.clear()
+            load_production_items.clear()
             st.rerun()
 
-    _refresh_timer()
+    _watch_cloud_snapshot()
 
 def main() -> None:
     inject_css()
     inject_shared_theme(mobile=True)
     page = normalize_mobile_page(query_value("page", "stock_in"))
-    cloud_auto_refresh_5min()
     mobile_language_bar()
     load_cloud_environment()
     settings = load_mobile_cloud_settings()
@@ -3655,6 +3672,7 @@ def main() -> None:
             "Configure SUPABASE_URL, SUPABASE_ANON_KEY, and MOBILE_PIN in the cloud platform environment."
         )
         return
+    install_cloud_live_refresh(settings)
     if page == "machine_status":
         machine_status_page(settings)
     elif page == "parameter_photo":

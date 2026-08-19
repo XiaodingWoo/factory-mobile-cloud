@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,12 @@ import pandas as pd
 
 from data_manager import (
     ExcelWriteLockError,
+    INVENTORY_FILE,
+    MOULD_FILE,
+    MOULD_MACHINE_COMPATIBILITY_FILE,
+    MOULD_MACHINE_SETTINGS_FILE,
+    PRODUCT_CATALOG_FILE,
+    PRODUCTION_FILE,
     add_loose_goods_record,
     add_mould_maintenance_record,
     add_production_change_request,
@@ -23,9 +31,12 @@ from data_manager import (
     get_moulds,
     get_product_catalog,
     get_production,
+    normalize_production_queue_statuses,
+    product_change_alert_payload,
     resolve_mould_status,
     stock_in,
     upsert_mould,
+    upsert_parameter_photo_record,
 )
 from supabase_config import load_settings, service_client, validate_worker_settings
 from config import registered_machine_ids
@@ -35,6 +46,10 @@ BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 LOG_FILE = LOG_DIR / "supabase_request_sync.log"
 PROCESSING_STALE_MINUTES = 30
+PARAMETER_PHOTO_BUCKET = "parameter-adjustment-photos"
+PARAMETER_PHOTO_LOCAL_DIR = BASE_DIR / "data" / "parameter_adjustment_photos"
+PARAMETER_PHOTO_SYNC_MARKER = LOG_DIR / "parameter_photo_sync.last"
+PARAMETER_PHOTO_SYNC_INTERVAL_HOURS = 24
 
 
 def setup_logger() -> logging.Logger:
@@ -88,22 +103,118 @@ def text_value(value: Any) -> str:
     return str(value or "").strip()
 
 
+def row_unit_weight_from_fields(row: Any) -> float:
+    explicit = number_or_zero(row.get("UnitWeightG"))
+    if explicit:
+        return explicit
+    return (
+        number_or_zero(row.get("MaterialWeightG"))
+        + number_or_zero(row.get("SecondMaterialWeightG"))
+        + number_or_zero(row.get("MasterbatchWeightG"))
+    )
+
+
+def effective_unit_weight_g(row: Any) -> float:
+    field_weight = row_unit_weight_from_fields(row)
+    if field_weight:
+        return field_weight
+    return catalog_unit_weight_for_row(row)
+
+
+def weight_text(value: Any) -> str:
+    number = number_or_zero(value)
+    if not number:
+        return ""
+    return str(int(number)) if float(number).is_integer() else f"{number:.1f}"
+
+
+_PRODUCT_WEIGHT_CACHE: dict[str, float] | None = None
+
+
+def product_weight_lookup() -> dict[str, float]:
+    global _PRODUCT_WEIGHT_CACHE
+    if _PRODUCT_WEIGHT_CACHE is not None:
+        return _PRODUCT_WEIGHT_CACHE
+    lookup: dict[str, float] = {}
+    try:
+        catalog = get_product_catalog()
+    except Exception:
+        _PRODUCT_WEIGHT_CACHE = lookup
+        return lookup
+    if catalog.empty:
+        _PRODUCT_WEIGHT_CACHE = lookup
+        return lookup
+
+    for _, row in catalog.iterrows():
+        unit = row_unit_weight_from_fields(row)
+        if not unit:
+            continue
+        for column in ["Item", "ProductCode", "ProductDetail", "ProductName"]:
+            if column not in row.index:
+                continue
+            key = text_value(row.get(column))
+            if key:
+                lookup.setdefault(key, unit)
+    _PRODUCT_WEIGHT_CACHE = lookup
+    return lookup
+
+
+def catalog_unit_weight_for_row(row: Any) -> float:
+    lookup = product_weight_lookup()
+    for column in ["ProductCode", "Item", "ProductName", "ProductDetail"]:
+        key = text_value(row.get(column))
+        if key and key in lookup:
+            return lookup[key]
+    return 0.0
+
+
+
+
+def packaging_option_text(row: Any) -> str:
+    return text_value(row.get("PackagingOption"))
+
+
+def public_product_display_name(row: Any) -> str:
+    name = text_value(row.get("ProductName")) or text_value(row.get("ProductDetail")) or text_value(row.get("ProductCode")) or text_value(row.get("Item"))
+    option = packaging_option_text(row)
+    if option and option.casefold() not in name.casefold():
+        return f"{name} - {option}"
+    return name
+
 def production_notes_text(row: Any) -> str:
     base = text_value(row.get("Notes"))
+    additional_packaging = text_value(row.get("AdditionalPackaging"))
+    if additional_packaging.upper() in {"NO", "N", "FALSE", "0", "NONE", "N/A", "-"}:
+        additional_packaging = ""
     pairs = [
         ("Packaging Type", row.get("PackagingType")),
-        ("Packaging", row.get("PackagingUnit")),
+        ("Packaging Option", row.get("PackagingOption")),
+        ("Additional Packaging", additional_packaging or "N/A"),
         ("Carton/Unit/Stack", row.get("CartonUnitStackQty")),
         ("Pallet Qty", row.get("PalletQty")),
         ("Pallet Bag", row.get("PalletBag")),
         ("Pallet Type", row.get("PalletType")),
         ("Wrap Pallet", row.get("WrapPallet")),
         ("Corner Protector", row.get("CornerProtector")),
-        ("Extra", row.get("AdditionalPackaging")),
+        ("Main Material Weight (g/pc)", weight_text(row.get("MaterialWeightG"))),
+        ("Second Material Weight (g/pc)", weight_text(row.get("SecondMaterialWeightG"))),
+        ("Masterbatch Weight (g/pc)", weight_text(row.get("MasterbatchWeightG"))),
+        ("Unit Total Weight (g/pc)", weight_text(effective_unit_weight_g(row))),
+        ("QC Details", row.get("QCNotes") or "N/A"),
         ("Instructions", row.get("AdditionalInstructions")),
     ]
-    generated = " | ".join(f"{label}: {text_value(value)}" for label, value in pairs if text_value(value))
-    if base and generated and generated not in base:
+    existing_labels = {
+        part.split(":", 1)[0].strip().casefold()
+        for part in base.split("|")
+        if ":" in part
+    }
+    generated_parts = [
+        f"{label}: {text_value(value)}"
+        for label, value in pairs
+        if text_value(value) and label.casefold() not in existing_labels
+    ]
+    generated = " | ".join(generated_parts)
+    if base and generated:
         return f"{base} | {generated}"
     return base or generated
 
@@ -478,8 +589,36 @@ def publish_products(client) -> int:
     return len(rows)
 
 
+
+def empty_alert_payload() -> dict[str, str]:
+    return {
+        "alert_id": "",
+        "alert_title_en": "",
+        "alert_title_zh": "",
+        "alert_message_en": "",
+        "alert_message_zh": "",
+        "alert_severity": "",
+    }
+
+
+def row_alert_payload(row: Any, machine_id: Any = "") -> dict[str, Any]:
+    return product_change_alert_payload(
+        text_value(row.get("ProductCode")),
+        text_value(row.get("ProductName")),
+        text_value(machine_id or row.get("MachineID")),
+        text_value(row.get("Status")),
+    )
+
+
+def visible_rows_alert_payload(visible: pd.DataFrame, machine_id: Any) -> dict[str, Any]:
+    for _, row in visible.iterrows():
+        payload = row_alert_payload(row, machine_id)
+        if payload.get("alert_message_en") or payload.get("alert_message_zh"):
+            return payload
+    return empty_alert_payload()
+
 def machine_public_rows() -> list[dict[str, Any]]:
-    production = get_production()
+    production = normalize_production_queue_statuses(get_production())
     rows = []
     for machine_id in registered_machine_ids(production):
         group = production[production["MachineID"].astype(str).str.strip() == machine_id]
@@ -512,7 +651,7 @@ def machine_public_rows() -> list[dict[str, Any]]:
         planned = sum(number_or_zero(value) for value in visible["PlannedQty"].tolist())
         completed = sum(number_or_zero(value) for value in visible["CompletedQty"].tolist())
         product_codes = [text_value(value) for value in visible["ProductCode"].tolist() if text_value(value)]
-        products = [text_value(value) for value in visible["ProductName"].tolist() if text_value(value)]
+        products = [public_product_display_name(row) for _, row in visible.iterrows() if public_product_display_name(row)]
         machine_names = [text_value(value) for value in visible["MachineName"].tolist() if text_value(value)]
         mould_numbers = [text_value(value) for value in visible["MouldNumber"].tolist() if text_value(value)]
         materials = [text_value(value) for value in visible["Material"].tolist() if text_value(value)]
@@ -523,6 +662,7 @@ def machine_public_rows() -> list[dict[str, Any]]:
         pallet_qty_values = [number_or_zero(value) for value in visible["PalletQty"].tolist() if number_or_zero(value)]
         status = " / ".join(dict.fromkeys(status_values)) or "No Plan"
         running_product = " / ".join(dict.fromkeys(products)) or "No running production plan"
+        alert_payload = visible_rows_alert_payload(visible, machine_id)
         rows.append(
             {
                 "machine_id": machine_id,
@@ -541,6 +681,7 @@ def machine_public_rows() -> list[dict[str, Any]]:
                 "operator_name": "",
                 "pallet_qty": pallet_qty_values[0] if pallet_qty_values else None,
                 "notes": " | ".join(dict.fromkeys(notes)),
+                **alert_payload,
                 "is_active": True,
                 "updated_at": utc_now(),
             }
@@ -556,7 +697,7 @@ def publish_machines(client) -> int:
 
 
 def production_item_rows() -> list[dict[str, Any]]:
-    production = get_production()
+    production = normalize_production_queue_statuses(get_production())
     rows = []
     for _, row in production.iterrows():
         status = text_value(row.get("Status"))
@@ -564,6 +705,7 @@ def production_item_rows() -> list[dict[str, Any]]:
             status = "Next"
         if status not in {"Running", "Next", "Planned"}:
             continue
+        alert_payload = row_alert_payload(row)
         rows.append(
             {
                 "schedule_id": text_value(row.get("ScheduleID")),
@@ -572,7 +714,7 @@ def production_item_rows() -> list[dict[str, Any]]:
                 "sequence": int(number_or_zero(row.get("Sequence"))),
                 "status": status,
                 "product_code": text_value(row.get("ProductCode")),
-                "product_name": text_value(row.get("ProductName")),
+                "product_name": public_product_display_name(row),
                 "mould_number": text_value(row.get("MouldNumber")),
                 "material": text_value(row.get("Material")),
                 "material_location": text_value(row.get("MaterialLocation")),
@@ -582,6 +724,7 @@ def production_item_rows() -> list[dict[str, Any]]:
                 "planned_qty": number_or_zero(row.get("PlannedQty")),
                 "completed_qty": number_or_zero(row.get("CompletedQty")),
                 "pallet_qty": first_number(row, ["PalletQty", "Pallet Qty", "pallet_qty", "palletQty"]) or None,
+                **alert_payload,
                 "updated_at": utc_now(),
                 "is_active": True,
             }
@@ -860,7 +1003,142 @@ def publish_moulds(client) -> int:
     return len(rows)
 
 
-def run_sync(publish_only: bool = False) -> dict[str, int]:
+
+def safe_filename_part(value: Any, fallback: str = "file") -> str:
+    text = str(value or fallback).strip() or fallback
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+    return cleaned[:120] or fallback
+
+
+def should_sync_parameter_photos(force: bool = False) -> bool:
+    if force:
+        return True
+    if not PARAMETER_PHOTO_SYNC_MARKER.exists():
+        return True
+    try:
+        last = datetime.fromtimestamp(PARAMETER_PHOTO_SYNC_MARKER.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return True
+    return datetime.now(timezone.utc) - last >= timedelta(hours=PARAMETER_PHOTO_SYNC_INTERVAL_HOURS)
+
+
+def mark_parameter_photo_sync_checked() -> None:
+    LOG_DIR.mkdir(exist_ok=True)
+    PARAMETER_PHOTO_SYNC_MARKER.write_text(utc_now(), encoding="utf-8")
+
+
+def storage_download_bytes(client, storage_path: str) -> bytes:
+    result = client.storage.from_(PARAMETER_PHOTO_BUCKET).download(storage_path)
+    if isinstance(result, bytes):
+        return result
+    if hasattr(result, "content"):
+        return bytes(result.content)
+    return bytes(result)
+
+
+def local_photo_path(request: dict[str, Any], kind: str, storage_path: str) -> Path:
+    machine_id = safe_filename_part(request.get("machine_id"), "machine")
+    created_at = text_value(request.get("created_at"))[:10] or datetime.now().strftime("%Y-%m-%d")
+    client_request_id = safe_filename_part(request.get("client_request_id") or request.get("id"), "request")
+    suffix = Path(storage_path).suffix or ".jpg"
+    folder = PARAMETER_PHOTO_LOCAL_DIR / created_at / f"machine_{machine_id}" / client_request_id
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{kind}{suffix}"
+
+
+def download_parameter_photo_file(client, request: dict[str, Any], kind: str) -> tuple[str, str, int]:
+    storage_path = text_value(request.get(f"{kind}_photo_path"))
+    if not storage_path:
+        return "", "", 0
+    payload = storage_download_bytes(client, storage_path)
+    destination = local_photo_path(request, kind, storage_path)
+    destination.write_bytes(payload)
+    return str(destination), hashlib.sha256(payload).hexdigest(), len(payload)
+
+
+def process_parameter_photo_requests(client, force: bool = False) -> tuple[int, int]:
+    if not should_sync_parameter_photos(force):
+        LOGGER.info("Parameter photo download skipped; next scheduled check is within 24 hours.")
+        return 0, 0
+    processed = 0
+    failed = 0
+    try:
+        response = (
+            client.table("parameter_photo_requests")
+            .select("*")
+            .eq("status", "pending_download")
+            .order("created_at")
+            .limit(50)
+            .execute()
+        )
+    except Exception:
+        LOGGER.exception("Unable to fetch parameter photo requests. Has supabase_migration_latest.sql been run?")
+        return 0, 1
+
+    for request in response.data or []:
+        request_id = text_value(request.get("id"))
+        client_request_id = text_value(request.get("client_request_id")) or request_id
+        try:
+            before_path, before_sha, before_size = download_parameter_photo_file(client, request, "before")
+            after_path, after_sha, after_size = download_parameter_photo_file(client, request, "after")
+            upsert_parameter_photo_record(
+                {
+                    "ClientRequestID": client_request_id,
+                    "CloudID": request_id,
+                    "MachineID": text_value(request.get("machine_id")),
+                    "ScheduleID": text_value(request.get("schedule_id")),
+                    "ProductCode": text_value(request.get("product_code")),
+                    "ProductName": text_value(request.get("product_name")),
+                    "MouldNumber": text_value(request.get("mould_number")),
+                    "ProblemDescription": text_value(request.get("problem_description")),
+                    "UploadedBy": text_value(request.get("uploaded_by")),
+                    "CreatedAt": text_value(request.get("created_at")),
+                    "CloudStatus": "downloaded",
+                    "BeforePhotoName": text_value(request.get("before_photo_name")),
+                    "BeforePhotoStoragePath": text_value(request.get("before_photo_path")),
+                    "BeforePhotoLocalPath": before_path,
+                    "BeforePhotoSize": str(before_size or request.get("before_photo_size") or ""),
+                    "BeforePhotoSha256": before_sha or text_value(request.get("before_photo_sha256")),
+                    "AfterPhotoName": text_value(request.get("after_photo_name")),
+                    "AfterPhotoStoragePath": text_value(request.get("after_photo_path")),
+                    "AfterPhotoLocalPath": after_path,
+                    "AfterPhotoSize": str(after_size or request.get("after_photo_size") or ""),
+                    "AfterPhotoSha256": after_sha or text_value(request.get("after_photo_sha256")),
+                    "DownloadedAt": utc_now(),
+                    "DownloadStatus": "Downloaded",
+                    "ReviewStatus": "Pending",
+                    "ErrorMessage": "",
+                }
+            )
+            client.table("parameter_photo_requests").update(
+                {"status": "downloaded", "downloaded_at": utc_now(), "error_message": None}
+            ).eq("id", request_id).execute()
+            remove_paths = [
+                path for path in [text_value(request.get("before_photo_path")), text_value(request.get("after_photo_path"))]
+                if path
+            ]
+            if remove_paths:
+                try:
+                    client.storage.from_(PARAMETER_PHOTO_BUCKET).remove(remove_paths)
+                except Exception:
+                    LOGGER.warning("Downloaded parameter photos but could not remove cloud storage copies for %s", client_request_id)
+            processed += 1
+            LOGGER.info("Downloaded parameter photo request %s", client_request_id)
+        except Exception as exc:
+            failed += 1
+            LOGGER.exception("Failed parameter photo request %s", client_request_id)
+            if request_id:
+                try:
+                    client.table("parameter_photo_requests").update(
+                        {"status": "error", "error_message": str(exc)[:1000], "updated_at": utc_now()}
+                    ).eq("id", request_id).execute()
+                except Exception:
+                    LOGGER.exception("Unable to mark parameter photo request %s as error", client_request_id)
+    mark_parameter_photo_sync_checked()
+    return processed, failed
+
+
+def run_sync(publish_only: bool = False, force_photo_sync: bool = False) -> dict[str, int]:
     settings = load_settings()
     validate_worker_settings(settings)
     client = service_client(settings)
@@ -871,6 +1149,8 @@ def run_sync(publish_only: bool = False) -> dict[str, int]:
         "production_change_failed": 0,
         "mould_change_processed": 0,
         "mould_change_failed": 0,
+        "parameter_photos_downloaded": 0,
+        "parameter_photo_failed": 0,
         "products_published": 0,
         "machines_published": 0,
         "production_items_published": 0,
@@ -882,6 +1162,7 @@ def run_sync(publish_only: bool = False) -> dict[str, int]:
         results["stock_processed"], results["stock_failed"] = process_stock_requests(client)
         results["production_change_processed"], results["production_change_failed"] = process_production_change_requests(client)
         results["mould_change_processed"], results["mould_change_failed"] = process_mould_change_requests(client)
+        results["parameter_photos_downloaded"], results["parameter_photo_failed"] = process_parameter_photo_requests(client, force=force_photo_sync)
     results["products_published"] = publish_products(client)
     results["machines_published"] = publish_machines(client)
     results["production_items_published"] = publish_production_items(client)
@@ -890,11 +1171,118 @@ def run_sync(publish_only: bool = False) -> dict[str, int]:
     return results
 
 
+
+WATCH_SOURCE_FILES = (
+    PRODUCTION_FILE,
+    INVENTORY_FILE,
+    PRODUCT_CATALOG_FILE,
+    MOULD_FILE,
+    MOULD_MACHINE_COMPATIBILITY_FILE,
+    MOULD_MACHINE_SETTINGS_FILE,
+)
+
+
+def _watch_file_marker() -> tuple[tuple[str, int, int], ...]:
+    marker: list[tuple[str, int, int]] = []
+    for path in WATCH_SOURCE_FILES:
+        try:
+            stat = path.stat()
+            marker.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+        except OSError:
+            marker.append((str(path), 0, 0))
+    return tuple(marker)
+
+
+def _table_has_pending(client, table_name: str) -> bool:
+    try:
+        response = client.table(table_name).select("id").eq("status", "pending").limit(1).execute()
+        return bool(response.data)
+    except Exception as exc:
+        LOGGER.debug("Pending check skipped for %s: %s", table_name, exc)
+        return False
+
+
+def cloud_requests_pending(client) -> bool:
+    for table_name in (
+        "stock_in_requests",
+        "production_change_requests",
+        "mould_change_requests",
+        "parameter_photo_requests",
+    ):
+        if _table_has_pending(client, table_name):
+            return True
+    return False
+
+
+def run_watch_loop(watch_interval: int = 5, full_sync_interval: int = 300) -> None:
+    watch_interval = max(int(watch_interval or 5), 2)
+    full_sync_interval = max(int(full_sync_interval or 300), 30)
+    settings = load_settings()
+    validate_worker_settings(settings)
+    client = service_client(settings)
+
+    LOGGER.info(
+        "Live sync watch started: check every %ss, fallback full sync every %ss",
+        watch_interval,
+        full_sync_interval,
+    )
+
+    # Start with one normal sync so both sides have a known baseline.
+    try:
+        run_sync()
+    except Exception:
+        LOGGER.exception("Initial live sync failed; watcher will continue retrying.")
+
+    last_marker = _watch_file_marker()
+    last_full_sync = time.monotonic()
+
+    while True:
+        try:
+            pending = cloud_requests_pending(client)
+            current_marker = _watch_file_marker()
+            local_changed = current_marker != last_marker
+            fallback_due = (time.monotonic() - last_full_sync) >= full_sync_interval
+
+            if pending:
+                LOGGER.info("Cloud change detected; syncing immediately.")
+                run_sync()
+                last_full_sync = time.monotonic()
+                last_marker = _watch_file_marker()
+            elif local_changed:
+                LOGGER.info("Local MIS data change detected; publishing cloud snapshot immediately.")
+                run_sync(publish_only=True)
+                last_marker = _watch_file_marker()
+            elif fallback_due:
+                LOGGER.info("Fallback sync interval reached; running full sync.")
+                run_sync()
+                last_full_sync = time.monotonic()
+                last_marker = _watch_file_marker()
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            LOGGER.exception("Live sync watch iteration failed; retrying after interval.")
+        time.sleep(watch_interval)
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Synchronize Supabase mobile requests into local Excel files.")
     parser.add_argument("--publish-only", action="store_true", help="Only publish public product and machine lists.")
     parser.add_argument("--check-config", action="store_true", help="Validate .env without contacting Supabase.")
+    parser.add_argument("--force-photo-sync", action="store_true", help="Download pending parameter photos even if the 24-hour check already ran.")
+    parser.add_argument("--watch", action="store_true", help="Watch for cloud/local changes and sync only when data changes.")
+    parser.add_argument("--watch-interval", type=int, default=5, help="Seconds between lightweight change checks in watch mode.")
+    parser.add_argument("--full-sync-interval", type=int, default=300, help="Fallback full sync interval in seconds while watching.")
     args = parser.parse_args()
+
+    if args.watch:
+        try:
+            run_watch_loop(args.watch_interval, args.full_sync_interval)
+            return 0
+        except KeyboardInterrupt:
+            LOGGER.info("Live sync watcher stopped.")
+            return 0
+        except Exception as exc:
+            LOGGER.exception("Live sync watcher failed: %s", exc)
+            return 1
 
     try:
         settings = load_settings()
@@ -902,7 +1290,7 @@ def main() -> int:
         if args.check_config:
             print("Supabase worker configuration is present.")
             return 0
-        results = run_sync(publish_only=args.publish_only)
+        results = run_sync(publish_only=args.publish_only, force_photo_sync=args.force_photo_sync)
         LOGGER.info("Sync complete: %s", results)
         print(results)
         return 0

@@ -1785,7 +1785,26 @@ def handover_device_id() -> str:
     return str(st.session_state["handover_device_id"])
 
 
-def handover_sync_browser_session(token: str = "", clear: bool = False) -> None:
+def handover_set_query_token(token: str) -> None:
+    token = str(token or "").strip()
+    if not token:
+        return
+    try:
+        if query_value(HANDOVER_SESSION_PARAM, "").strip() != token:
+            st.query_params[HANDOVER_SESSION_PARAM] = token
+    except Exception:
+        pass
+
+
+def handover_clear_query_token() -> None:
+    try:
+        if HANDOVER_SESSION_PARAM in st.query_params:
+            del st.query_params[HANDOVER_SESSION_PARAM]
+    except Exception:
+        pass
+
+
+def handover_sync_browser_session(token: str = "", clear: bool = False, reload_after_save: bool = False) -> None:
     """Keep the employee session in browser localStorage and URL query params.
 
     Streamlit session_state alone is not enough when a worker scans another
@@ -1796,32 +1815,114 @@ def handover_sync_browser_session(token: str = "", clear: bool = False) -> None:
     key_json = json.dumps(HANDOVER_SESSION_STORAGE_KEY)
     param_json = json.dumps(HANDOVER_SESSION_PARAM)
     clear_js = "true" if clear else "false"
+    reload_js = "true" if reload_after_save else "false"
     components.html(
         f"""
         <script>
-        const doc = window.parent.document;
         const key = {key_json};
         const param = {param_json};
         const explicitToken = {token_json};
         const clearToken = {clear_js};
-        const url = new URL(window.parent.location.href);
+        const reloadAfterSave = {reload_js};
+        const maxAgeSeconds = {HANDOVER_AUTH_SESSION_HOURS * 60 * 60};
+
+        function parentLocationHref() {{
+            try {{
+                return window.parent.location.href;
+            }} catch (err) {{
+                return window.location.href;
+            }}
+        }}
+
+        function replaceLocation(url) {{
+            try {{
+                window.parent.location.replace(url);
+            }} catch (err) {{
+                window.location.replace(url);
+            }}
+        }}
+
+        function reloadLocation() {{
+            try {{
+                window.parent.location.reload();
+            }} catch (err) {{
+                window.location.reload();
+            }}
+        }}
+
+        function setStoredToken(value) {{
+            try {{
+                window.parent.localStorage.setItem(key, value);
+            }} catch (err) {{
+                try {{ window.localStorage.setItem(key, value); }} catch (innerErr) {{}}
+            }}
+            const cookie = `${{encodeURIComponent(key)}}=${{encodeURIComponent(value)}}; max-age=${{maxAgeSeconds}}; path=/; SameSite=Lax`;
+            try {{
+                window.parent.document.cookie = cookie;
+            }} catch (err) {{
+                try {{ document.cookie = cookie; }} catch (innerErr) {{}}
+            }}
+        }}
+
+        function removeStoredToken() {{
+            try {{
+                window.parent.localStorage.removeItem(key);
+            }} catch (err) {{
+                try {{ window.localStorage.removeItem(key); }} catch (innerErr) {{}}
+            }}
+            const expired = `${{encodeURIComponent(key)}}=; max-age=0; path=/; SameSite=Lax`;
+            try {{
+                window.parent.document.cookie = expired;
+            }} catch (err) {{
+                try {{ document.cookie = expired; }} catch (innerErr) {{}}
+            }}
+        }}
+
+        function cookieToken() {{
+            let cookieText = "";
+            try {{
+                cookieText = window.parent.document.cookie || "";
+            }} catch (err) {{
+                try {{ cookieText = document.cookie || ""; }} catch (innerErr) {{ cookieText = ""; }}
+            }}
+            const needle = encodeURIComponent(key) + "=";
+            for (const part of cookieText.split(";")) {{
+                const item = part.trim();
+                if (item.startsWith(needle)) {{
+                    return decodeURIComponent(item.slice(needle.length));
+                }}
+            }}
+            return "";
+        }}
+
+        function storedToken() {{
+            try {{
+                return window.parent.localStorage.getItem(key) || cookieToken();
+            }} catch (err) {{
+                try {{ return window.localStorage.getItem(key) || cookieToken(); }} catch (innerErr) {{ return cookieToken(); }}
+            }}
+        }}
+
+        const url = new URL(parentLocationHref());
         if (clearToken) {{
-            window.parent.localStorage.removeItem(key);
+            removeStoredToken();
             if (url.searchParams.has(param)) {{
                 url.searchParams.delete(param);
-                window.parent.location.replace(url.toString());
+                replaceLocation(url.toString());
             }}
         }} else if (explicitToken) {{
-            window.parent.localStorage.setItem(key, explicitToken);
+            setStoredToken(explicitToken);
             if (url.searchParams.get(param) !== explicitToken) {{
                 url.searchParams.set(param, explicitToken);
-                window.parent.location.replace(url.toString());
+                replaceLocation(url.toString());
+            }} else if (reloadAfterSave) {{
+                reloadLocation();
             }}
         }} else {{
-            const storedToken = window.parent.localStorage.getItem(key);
-            if (storedToken && !url.searchParams.get(param)) {{
-                url.searchParams.set(param, storedToken);
-                window.parent.location.replace(url.toString());
+            const restoredToken = storedToken();
+            if (restoredToken && !url.searchParams.get(param)) {{
+                url.searchParams.set(param, restoredToken);
+                replaceLocation(url.toString());
             }}
         }}
         </script>
@@ -1854,6 +1955,7 @@ def clear_handover_login_state(clear_browser: bool = True) -> None:
         "handover_pending_reset",
     ]:
         st.session_state.pop(key, None)
+    handover_clear_query_token()
     if clear_browser:
         handover_sync_browser_session(clear=True)
 
@@ -2013,8 +2115,10 @@ def render_handover_login(settings: MobileCloudSettings, allow_guest: bool = Tru
         st.session_state["handover_guest"] = False
         if payload.get("must_change_password"):
             st.session_state["handover_pending_reset"] = True
-        handover_sync_browser_session(token=token)
-        st.rerun()
+        handover_set_query_token(token)
+        st.success("Signed in. Loading... / 已登录，正在进入系统...")
+        handover_sync_browser_session(token=token, reload_after_save=True)
+        st.stop()
 
     if allow_guest and st.button("Continue as Guest / 游客只读查看", use_container_width=True):
         st.session_state["handover_guest"] = True

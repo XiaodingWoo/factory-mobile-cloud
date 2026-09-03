@@ -7,8 +7,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
+from environment import env_file_for_current_env
 
-ENV_FILE = Path(__file__).resolve().parent / ".env"
+
+ENV_FILE = env_file_for_current_env()
 
 
 @dataclass(frozen=True)
@@ -35,8 +37,6 @@ def validate_mobile_cloud_settings(settings: MobileCloudSettings) -> None:
         missing.append("SUPABASE_URL")
     if not settings.anon_key:
         missing.append("SUPABASE_ANON_KEY")
-    if not settings.mobile_pin:
-        missing.append("MOBILE_PIN")
     if missing:
         raise RuntimeError(f"Missing environment settings: {', '.join(missing)}")
 

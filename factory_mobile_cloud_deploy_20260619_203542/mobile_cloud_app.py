@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -79,6 +79,11 @@ MACHINE_REQUIRED_COLUMNS = [
 
 PARAMETER_PHOTO_BUCKET = "parameter-adjustment-photos"
 PARAMETER_PHOTO_MAX_FILE_MB = int(os.getenv("PARAMETER_PHOTO_MAX_FILE_MB", "8"))
+HANDOVER_SESSION_PARAM = "employee_session"
+HANDOVER_SESSION_STORAGE_KEY = "factory_mis_employee_session"
+HANDOVER_AUTH_SESSION_HOURS = 8
+HANDOVER_VISIBLE_SHIFT_COUNT = 2
+HANDOVER_PRIORITY_OPTIONS = ["NORMAL", "ATTENTION", "URGENT"]
 
 
 class SupabaseMachineSchemaError(RuntimeError):
@@ -1496,6 +1501,83 @@ def inject_css() -> None:
             color: inherit !important;
             -webkit-text-fill-color: inherit !important;
         }
+        .handover-user-strip {
+            background: #ffffff !important;
+            border: 1px solid #cbd5e1 !important;
+            border-radius: 12px;
+            color: #172033 !important;
+            font-weight: 800;
+            margin: 8px 0 12px;
+            padding: 12px 14px;
+            -webkit-text-fill-color: #172033 !important;
+        }
+        .handover-section-card {
+            background: #ffffff !important;
+            border: 1px solid #cbd5e1 !important;
+            border-radius: 12px;
+            margin: 12px 0;
+            padding: 12px;
+        }
+        .handover-section-title {
+            color: #172033 !important;
+            font-size: 1rem;
+            font-weight: 900;
+            margin-bottom: 10px;
+            -webkit-text-fill-color: #172033 !important;
+        }
+        .handover-entry {
+            background: #f8fafc !important;
+            border-left: 5px solid #2563eb !important;
+            border-radius: 12px;
+            color: #172033 !important;
+            font-size: 1rem;
+            font-weight: 750;
+            line-height: 1.45;
+            margin: 10px 0;
+            padding: 12px 12px 10px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            -webkit-text-fill-color: #172033 !important;
+        }
+        .handover-entry-meta {
+            color: #64748b !important;
+            font-size: 0.84rem;
+            font-weight: 700;
+            margin-top: 8px;
+            -webkit-text-fill-color: #64748b !important;
+        }
+        .handover-empty {
+            background: #f8fafc !important;
+            border-radius: 10px;
+            color: #64748b !important;
+            font-weight: 700;
+            padding: 12px;
+            -webkit-text-fill-color: #64748b !important;
+        }
+        .priority-badge {
+            border-radius: 999px;
+            display: inline-block;
+            font-size: 0.76rem;
+            font-weight: 900;
+            margin-right: 8px;
+            padding: 3px 9px;
+            vertical-align: middle;
+        }
+        .priority-normal {
+            background: #e2e8f0 !important;
+            color: #334155 !important;
+            -webkit-text-fill-color: #334155 !important;
+        }
+        .priority-attention {
+            background: #fef3c7 !important;
+            color: #92400e !important;
+            -webkit-text-fill-color: #92400e !important;
+        }
+        .priority-urgent {
+            background: #fee2e2 !important;
+            color: #991b1b !important;
+            -webkit-text-fill-color: #991b1b !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1517,6 +1599,8 @@ def normalize_mobile_page(page: str) -> str:
         return "stock_in"
     if value in {"parameter_photo", "parameter_photos", "parameter_adjustment", "parameter_adjustment_photo"}:
         return "parameter_photo"
+    if value in {"handover", "shift_handover", "shift-handover"}:
+        return "handover"
     if value in {"mould", "moulds", "mould_management", "mould_manager"}:
         return "moulds" if value != "mould" else "mould"
     return str(page or "stock_in").strip() or "stock_in"
@@ -1570,6 +1654,9 @@ def mobile_language_bar() -> None:
 def require_pin(mobile_pin: str) -> bool:
     if st.session_state.get("mobile_pin_ok"):
         return True
+    if not str(mobile_pin or "").strip():
+        st.error("MOBILE_PIN is not configured. / MOBILE_PIN 未配置。")
+        return False
     st.title("Factory Mobile")
     with st.form("pin_form"):
         pin = st.text_input(t("common.pin"), type="password", placeholder=t("pin.placeholder"))
@@ -1655,6 +1742,433 @@ def load_public_mould_machine_settings(settings: MobileCloudSettings) -> list[di
     client = mobile_cloud_client(settings)
     response = client.table("mobile_public_mould_machine_settings").select("*").eq("is_active", True).execute()
     return response.data or []
+
+
+def handover_device_id() -> str:
+    if not st.session_state.get("handover_device_id"):
+        st.session_state["handover_device_id"] = str(uuid4())
+    return str(st.session_state["handover_device_id"])
+
+
+def handover_sync_browser_session(token: str = "", clear: bool = False) -> None:
+    """Keep the employee session in browser localStorage and URL query params.
+
+    Streamlit session_state alone is not enough when a worker scans another
+    machine QR code. The tiny browser script restores the 8-hour Supabase
+    session token into the next scanned URL before the server renders the app.
+    """
+    token_json = json.dumps(str(token or ""))
+    key_json = json.dumps(HANDOVER_SESSION_STORAGE_KEY)
+    param_json = json.dumps(HANDOVER_SESSION_PARAM)
+    clear_js = "true" if clear else "false"
+    components.html(
+        f"""
+        <script>
+        const doc = window.parent.document;
+        const key = {key_json};
+        const param = {param_json};
+        const explicitToken = {token_json};
+        const clearToken = {clear_js};
+        const url = new URL(window.parent.location.href);
+        if (clearToken) {{
+            window.parent.localStorage.removeItem(key);
+            if (url.searchParams.has(param)) {{
+                url.searchParams.delete(param);
+                window.parent.location.replace(url.toString());
+            }}
+        }} else if (explicitToken) {{
+            window.parent.localStorage.setItem(key, explicitToken);
+            if (url.searchParams.get(param) !== explicitToken) {{
+                url.searchParams.set(param, explicitToken);
+                window.parent.location.replace(url.toString());
+            }}
+        }} else {{
+            const storedToken = window.parent.localStorage.getItem(key);
+            if (storedToken && !url.searchParams.get(param)) {{
+                url.searchParams.set(param, storedToken);
+                window.parent.location.replace(url.toString());
+            }}
+        }}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def current_handover_token() -> str:
+    query_token = query_value(HANDOVER_SESSION_PARAM, "").strip()
+    if query_token:
+        st.session_state["handover_session_token"] = query_token
+        return query_token
+    return str(st.session_state.get("handover_session_token") or "").strip()
+
+
+def url_with_handover_session(page: str, **params: object) -> str:
+    token = current_handover_token()
+    if token and HANDOVER_SESSION_PARAM not in params:
+        params[HANDOVER_SESSION_PARAM] = token
+    return url_with_lang(page, **params)
+
+
+def clear_handover_login_state(clear_browser: bool = True) -> None:
+    for key in [
+        "handover_session_token",
+        "handover_user",
+        "handover_guest",
+        "handover_pending_reset",
+    ]:
+        st.session_state.pop(key, None)
+    if clear_browser:
+        handover_sync_browser_session(clear=True)
+
+
+def cloud_rpc(settings: MobileCloudSettings, function_name: str, params: dict[str, object] | None = None) -> object:
+    client = mobile_cloud_client(settings)
+    response = client.rpc(function_name, params or {}).execute()
+    return response.data
+
+
+def rpc_ok(payload: object) -> bool:
+    return isinstance(payload, dict) and bool(payload.get("ok"))
+
+
+def handover_current_session(settings: MobileCloudSettings) -> dict | None:
+    if st.session_state.get("handover_guest"):
+        return {
+            "ok": True,
+            "user_id": "guest",
+            "username": "GUEST",
+            "display_name": "Guest / 游客",
+            "role": "guest",
+            "handover_acknowledged": True,
+        }
+    token = current_handover_token()
+    if not token:
+        return None
+    try:
+        payload = cloud_rpc(settings, "mobile_employee_session", {"p_session_token": token})
+    except Exception:
+        clear_handover_login_state(clear_browser=False)
+        raise
+    if not rpc_ok(payload):
+        clear_handover_login_state(clear_browser=True)
+        return None
+    assert isinstance(payload, dict)
+    st.session_state["handover_user"] = payload
+    return payload
+
+
+def priority_label(priority: object) -> str:
+    value = str(priority or "NORMAL").strip().upper()
+    return value if value in HANDOVER_PRIORITY_OPTIONS else "NORMAL"
+
+
+def priority_badge(priority: object) -> str:
+    value = priority_label(priority)
+    return f'<span class="priority-badge priority-{value.lower()}">{escape(value)}</span>'
+
+
+def handover_entries(settings: MobileCloudSettings, token: str) -> list[dict]:
+    try:
+        rows = cloud_rpc(settings, "mobile_handover_feed", {"p_session_token": token})
+    except Exception as exc:
+        show_supabase_diagnostic("Unable to load handover. Please run the handover Supabase migration. / 无法读取交班，请先执行 handover migration。", exc)
+        return []
+    if not isinstance(rows, list):
+        return []
+    shift_keys: list[str] = []
+    filtered: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        shift_key = str(row.get("shift_key") or "")
+        if shift_key and shift_key not in shift_keys:
+            shift_keys.append(shift_key)
+        if shift_key in shift_keys[:HANDOVER_VISIBLE_SHIFT_COUNT]:
+            filtered.append(row)
+    return filtered
+
+
+def handover_draft(settings: MobileCloudSettings, token: str) -> list[dict]:
+    try:
+        rows = cloud_rpc(settings, "mobile_handover_draft", {"p_session_token": token})
+    except Exception as exc:
+        show_supabase_diagnostic("Unable to load handover draft. / 无法读取交班草稿。", exc)
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def render_handover_board(rows: list[dict], machine_ids: list[str]) -> None:
+    st.caption("Showing handover from the last two shifts only. / 只显示最近两个班次的交班内容。")
+    grouped: dict[str, list[dict]] = {"general": []}
+    for machine_id in machine_ids:
+        grouped[f"machine::{machine_id}"] = []
+    for row in rows:
+        section = str(row.get("section_type") or "general").strip().lower()
+        machine_id = str(row.get("machine_id") or "").strip()
+        key = "general" if section == "general" else f"machine::{machine_id}"
+        grouped.setdefault(key, []).append(row)
+
+    def section(title: str, section_rows: list[dict]) -> None:
+        body = [f'<div class="handover-section-title">{escape(title)}</div>']
+        if not section_rows:
+            body.append('<div class="handover-empty">No handover yet / 暂无交班内容</div>')
+        for index, row in enumerate(section_rows, start=1):
+            message = escape(str(row.get("message") or ""))
+            submitted_by = escape(str(row.get("submitted_by_display_name") or row.get("submitted_by_username") or "-"))
+            submitted_at = escape(format_local_datetime(row.get("published_at")))
+            body.append(
+                '<div class="handover-entry">'
+                f'<div>{index}. {priority_badge(row.get("priority"))}{message}</div>'
+                f'<div class="handover-entry-meta">submit by {submitted_by} | {submitted_at}</div>'
+                '</div>'
+            )
+        st.markdown(f'<div class="handover-section-card">{"".join(body)}</div>', unsafe_allow_html=True)
+
+    section("General / 通用交班", grouped.get("general", []))
+    for machine_id in machine_ids:
+        section(f"Machine {machine_id} / 机器 {machine_id}", grouped.get(f"machine::{machine_id}", []))
+
+
+def render_handover_login(settings: MobileCloudSettings, allow_guest: bool = True) -> None:
+    handover_sync_browser_session()
+    st.title("Employee Login / 员工登录")
+    st.caption(
+        f"Sign in once on this phone. The login is valid for {HANDOVER_AUTH_SESSION_HOURS} hours. "
+        f"/ 本手机登录一次，{HANDOVER_AUTH_SESSION_HOURS}小时内不用重复登录。"
+    )
+    st.caption("For super access, leave Employee ID blank and enter the super password. / 超级密码登录时，员工ID留空。")
+    with st.form("mobile_employee_login_form"):
+        username = st.text_input("Employee ID / 员工ID", placeholder="Alan / Zhiwei")
+        password = st.text_input("Password / 密码", type="password")
+        login = st.form_submit_button("Sign in / 登录", type="primary")
+    if login:
+        try:
+            payload = cloud_rpc(
+                settings,
+                "mobile_employee_login",
+                {
+                    "p_username": username.strip(),
+                    "p_password": password,
+                    "p_device_id": handover_device_id(),
+                },
+            )
+        except Exception as exc:
+            show_supabase_diagnostic("Employee login is not ready. Please run the handover Supabase migration. / 员工登录尚未启用，请先执行 handover migration。", exc)
+            return
+        if not rpc_ok(payload):
+            st.error("Invalid employee ID or password. / 员工ID或密码不正确。")
+            return
+        assert isinstance(payload, dict)
+        token = str(payload.get("session_token") or "")
+        st.session_state["handover_session_token"] = token
+        st.session_state["handover_user"] = payload
+        st.session_state["handover_guest"] = False
+        if payload.get("must_change_password"):
+            st.session_state["handover_pending_reset"] = True
+        handover_sync_browser_session(token=token)
+        st.rerun()
+
+    if allow_guest and st.button("Continue as Guest / 游客只读查看", use_container_width=True):
+        st.session_state["handover_guest"] = True
+        st.session_state["handover_user"] = {
+            "user_id": "guest",
+            "username": "GUEST",
+            "display_name": "Guest / 游客",
+            "role": "guest",
+            "handover_acknowledged": True,
+        }
+        st.rerun()
+
+
+def render_handover_password_reset(settings: MobileCloudSettings, session: dict) -> None:
+    st.title("Reset Password / 修改初始密码")
+    st.warning("First login requires a new password. / 首次登录需要修改密码。")
+    with st.form("mobile_employee_password_reset_form"):
+        new_password = st.text_input("New password / 新密码", type="password")
+        confirm_password = st.text_input("Confirm password / 确认密码", type="password")
+        submit = st.form_submit_button("Reset and continue / 修改并继续", type="primary")
+    if not submit:
+        return
+    if new_password != confirm_password:
+        st.error("Passwords do not match. / 两次密码不一致。")
+        return
+    token = str(session.get("session_token") or current_handover_token())
+    try:
+        payload = cloud_rpc(
+            settings,
+            "mobile_employee_change_password",
+            {"p_session_token": token, "p_new_password": new_password},
+        )
+    except Exception as exc:
+        show_supabase_diagnostic("Password reset failed. / 修改密码失败。", exc)
+        return
+    if not rpc_ok(payload):
+        st.error("Password reset failed. Use at least 4 characters. / 修改失败，密码至少4位。")
+        return
+    st.session_state.pop("handover_pending_reset", None)
+    st.session_state["handover_user"] = payload
+    st.success("Password updated. / 密码已修改。")
+    st.rerun()
+
+
+def handover_auth_gate(
+    settings: MobileCloudSettings,
+    machine_ids: list[str],
+    require_ack: bool = True,
+    allow_guest: bool = True,
+) -> dict | None:
+    try:
+        session = handover_current_session(settings)
+    except Exception as exc:
+        show_supabase_diagnostic("Employee session check failed. / 员工登录状态检查失败。", exc)
+        return None
+    if not session:
+        render_handover_login(settings, allow_guest=allow_guest)
+        return None
+    is_guest = bool(st.session_state.get("handover_guest"))
+    if is_guest and not allow_guest:
+        clear_handover_login_state(clear_browser=False)
+        render_handover_login(settings, allow_guest=False)
+        return None
+    st.markdown(
+        f'<div class="handover-user-strip">Signed in as: {escape(str(session.get("display_name") or session.get("username") or "-"))}</div>',
+        unsafe_allow_html=True,
+    )
+    if is_guest:
+        st.info("Guest read-only mode. Handover confirm, draft, and publish are disabled. / 游客只读：不能确认、保存或发布交班。")
+        return session
+    if session.get("must_change_password") or st.session_state.get("handover_pending_reset"):
+        render_handover_password_reset(settings, session)
+        return None
+    if require_ack and not bool(session.get("handover_acknowledged")):
+        st.subheader("Read handover before entering machine status / 进入机器状态前先确认交班")
+        token = str(session.get("session_token") or current_handover_token())
+        render_handover_board(handover_entries(settings, token), machine_ids)
+        if st.button("Confirm and view machine status / 确认并查看机器状态", type="primary", use_container_width=True):
+            payload = cloud_rpc(settings, "mobile_handover_acknowledge", {"p_session_token": token})
+            if rpc_ok(payload):
+                st.success("Confirmed. / 已确认。")
+                st.rerun()
+            else:
+                st.error("Unable to confirm handover. Please sign in again. / 无法确认交班，请重新登录。")
+        return None
+    return session
+
+
+def handover_payload_from_form(
+    general: str,
+    general_priority: str,
+    machine_notes: dict[str, str],
+    priorities: dict[str, str],
+) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    if general.strip():
+        entries.append(
+            {
+                "section_type": "general",
+                "machine_id": "",
+                "message": general.strip(),
+                "priority": priority_label(general_priority),
+            }
+        )
+    for machine_id, message in machine_notes.items():
+        if not message.strip():
+            continue
+        entries.append(
+            {
+                "section_type": "machine",
+                "machine_id": machine_id,
+                "message": message.strip(),
+                "priority": priority_label(priorities.get(machine_id)),
+            }
+        )
+    return entries
+
+
+def render_handover_editor(settings: MobileCloudSettings, session: dict, machine_ids: list[str]) -> None:
+    token = str(session.get("session_token") or current_handover_token())
+    draft_rows = handover_draft(settings, token)
+    general_draft = next((row for row in draft_rows if str(row.get("section_type") or "") == "general"), {})
+    machine_drafts = {
+        str(row.get("machine_id") or ""): row
+        for row in draft_rows
+        if str(row.get("section_type") or "") == "machine"
+    }
+    with st.expander("End shift and fill handover / 下班并填写交班", expanded=True):
+        with st.form("mobile_handover_editor_form"):
+            general_cols = st.columns([3, 1])
+            general = general_cols[0].text_area(
+                "General handover / 通用交班",
+                value=str(general_draft.get("message") or ""),
+                height=110,
+            )
+            general_priority = general_cols[1].selectbox(
+                "Priority / 优先级",
+                HANDOVER_PRIORITY_OPTIONS,
+                index=HANDOVER_PRIORITY_OPTIONS.index(priority_label(general_draft.get("priority"))),
+            )
+            machine_notes: dict[str, str] = {}
+            priorities: dict[str, str] = {}
+            for machine_id in machine_ids:
+                existing = machine_drafts.get(machine_id, {})
+                cols = st.columns([3, 1])
+                machine_notes[machine_id] = cols[0].text_area(
+                    f"Machine {machine_id} / 机器 {machine_id}",
+                    value=str(existing.get("message") or ""),
+                    height=82,
+                    key=f"cloud_handover_machine_{machine_id}",
+                )
+                priorities[machine_id] = cols[1].selectbox(
+                    "Priority / 优先级",
+                    HANDOVER_PRIORITY_OPTIONS,
+                    index=HANDOVER_PRIORITY_OPTIONS.index(priority_label(existing.get("priority"))),
+                    key=f"cloud_handover_priority_{machine_id}",
+                )
+            save_draft = st.form_submit_button("Save draft / 保存草稿")
+            publish = st.form_submit_button("Publish handover / 发布交班", type="primary")
+    if not (save_draft or publish):
+        return
+    entries = handover_payload_from_form(general, general_priority, machine_notes, priorities)
+    if save_draft:
+        payload = cloud_rpc(settings, "mobile_handover_save_draft", {"p_session_token": token, "p_entries": entries})
+        if rpc_ok(payload):
+            st.success("Draft saved. It remains private until publish or shift-end auto publish. / 草稿已保存，发布或班次结束前不会公开。")
+        else:
+            st.error("Unable to save draft. / 草稿保存失败。")
+        return
+    payload = cloud_rpc(settings, "mobile_handover_publish", {"p_session_token": token, "p_entries": entries})
+    if rpc_ok(payload):
+        st.success("Handover published. / 交班已发布。")
+        st.rerun()
+    else:
+        st.error("Please enter at least one handover note before publishing. / 发布前请至少填写一条交班内容。")
+
+
+def handover_page(settings: MobileCloudSettings) -> None:
+    st.title("Shift Handover / 交班信息")
+    try:
+        machines = load_machines(settings)
+    except Exception as exc:
+        show_supabase_diagnostic(t("machine.load_error"), exc)
+        return
+    machine_ids = [str(row.get("machine_id") or "").strip() for row in machines if str(row.get("machine_id") or "").strip()]
+    session = handover_auth_gate(settings, machine_ids, require_ack=False)
+    if not session:
+        return
+    requested_machine_id = query_value("machine_id", "").strip()
+    back_url = url_with_handover_session("machine_status", machine_id=requested_machine_id) if requested_machine_id else url_with_handover_session("machine_status")
+    st.markdown(
+        f'<a class="machine-button" href="{escape(back_url)}">Back to machine status / 返回机器状态</a>',
+        unsafe_allow_html=True,
+    )
+    if st.session_state.get("handover_guest"):
+        st.info("Guest can view machine status only. / 游客只能查看机器状态。")
+        return
+    token = str(session.get("session_token") or current_handover_token())
+    render_handover_board(handover_entries(settings, token), machine_ids)
+    render_handover_editor(settings, session, machine_ids)
 
 
 def mould_snapshot_lookup(moulds: list[dict]) -> dict[str, dict]:
@@ -2268,7 +2782,12 @@ def _stock_step_quantity(selectable_items: list[dict], products_by_code: dict[st
             qty = pallet_qty
     else:
         qty = st.number_input(t("stock.custom_quantity"), min_value=1, step=1, value=1, key=qty_key)
-    operator_name = st.text_input(t("common.operator"), placeholder=t("common.required"), key=operator_key)
+    operator_name = st.text_input(
+        t("common.operator"),
+        placeholder=t("common.required"),
+        key=operator_key,
+        disabled=True,
+    )
     note = st.text_area(t("common.note_optional"), key=note_key)
 
     if st.button(t("stock.next_confirm"), type="primary", disabled=qty <= 0):
@@ -2438,6 +2957,13 @@ def _stock_step_confirm(settings: MobileCloudSettings, selectable_items: list[di
 
 def stock_in_request_page(settings: MobileCloudSettings) -> None:
     st.title(t("stock.title"))
+    session = handover_auth_gate(settings, [], require_ack=False, allow_guest=False)
+    if not session:
+        return
+    if not st.session_state.get("stock_last_operator"):
+        st.session_state["stock_last_operator"] = str(
+            session.get("display_name") or session.get("username") or ""
+        )
     if "stock_step" not in st.session_state:
         st.session_state["stock_step"] = "machine"
     current_request_id()
@@ -3164,7 +3690,7 @@ def machine_button_list(machines: list[dict]) -> None:
             continue
         status = str(machine.get("status") or "No Plan")
         css_class = status_class(status)
-        query = url_with_lang("machine_status", machine_id=machine_id)
+        query = url_with_handover_session("machine_status", machine_id=machine_id)
         links.append(
             f'<a class="machine-button {css_class}" href="{escape(query)}">{escape(machine_id)}<small>{escape(status_display(status))}</small></a>'
         )
@@ -3347,6 +3873,11 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
         st.warning(t("machine.empty"))
         return
 
+    machine_ids = [str(machine.get("machine_id") or "").strip() for machine in machines if str(machine.get("machine_id") or "").strip()]
+    session = handover_auth_gate(settings, machine_ids, require_ack=True)
+    if not session:
+        return
+
     requested_machine_id = query_value("machine_id", "").strip()
     if not requested_machine_id:
         st.caption(t("machine.select"))
@@ -3366,7 +3897,12 @@ def machine_status_page(settings: MobileCloudSettings) -> None:
     except Exception:
         moulds_by_number = {}
         settings_by_pair = {}
-    st.markdown(f'<a class="machine-button" href="{escape(url_with_lang("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
+    st.markdown(f'<a class="machine-button" href="{escape(url_with_handover_session("machine_status"))}">{escape(t("machine.back"))}</a>', unsafe_allow_html=True)
+    handover_url = url_with_handover_session("handover", machine_id=requested_machine_id)
+    st.markdown(
+        f'<a class="machine-button status-running" href="{escape(handover_url)}">Handover<br><small>查看交班</small></a>',
+        unsafe_allow_html=True,
+    )
     photo_url = url_with_lang("parameter_photo", machine_id=requested_machine_id)
     st.markdown(
         f'<a class="machine-button status-maintenance" href="{escape(photo_url)}">Upload Parameter Adjustment<br><small>上传参数调整照片</small></a>',
@@ -3627,11 +4163,13 @@ def main() -> None:
     except RuntimeError as exc:
         st.error(str(exc))
         st.info(
-            "Configure SUPABASE_URL, SUPABASE_ANON_KEY, and MOBILE_PIN in the cloud platform environment."
+            "Configure SUPABASE_URL and SUPABASE_ANON_KEY in the cloud platform environment."
         )
         return
     if page == "machine_status":
         machine_status_page(settings)
+    elif page == "handover":
+        handover_page(settings)
     elif page == "parameter_photo":
         if not require_pin(settings.mobile_pin):
             return
@@ -3643,8 +4181,6 @@ def main() -> None:
         if require_tech_manager_pin(settings):
             mould_detail_page(settings)
     else:
-        if not require_pin(settings.mobile_pin):
-            return
         stock_in_request_page(settings)
 
 

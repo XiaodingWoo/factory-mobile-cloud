@@ -117,8 +117,43 @@ def debug_supabase_enabled() -> bool:
     return value in {"1", "true", "yes", "y", "on"}
 
 
+def supabase_error_text(exc: Exception) -> str:
+    parts: list[str] = []
+    for value in (str(exc), repr(getattr(exc, "args", ""))):
+        if value and value not in parts:
+            parts.append(value)
+    for attr in ("code", "message", "details", "hint"):
+        value = getattr(exc, attr, "")
+        if value and str(value) not in parts:
+            parts.append(str(value))
+    return " | ".join(parts)
+
+
+def supabase_error_summary(exc: Exception) -> str:
+    text = " ".join(supabase_error_text(exc).split())
+    if len(text) > 500:
+        return text[:497] + "..."
+    return text
+
+
+def is_missing_rpc_error(exc: Exception, function_name: str) -> bool:
+    text = supabase_error_text(exc).casefold()
+    markers = [
+        "pgrst202",
+        "could not find the function",
+        "could not find function",
+        "schema cache",
+        "does not exist",
+        "undefined function",
+    ]
+    return function_name.casefold() in text and any(marker in text for marker in markers)
+
+
 def show_supabase_diagnostic(message: str, exc: Exception) -> None:
     st.error(message)
+    summary = supabase_error_summary(exc)
+    if summary:
+        st.caption(f"Supabase error: {summary}")
     if debug_supabase_enabled():
         st.exception(exc)
     else:
@@ -1873,7 +1908,11 @@ def handover_entries(settings: MobileCloudSettings, token: str) -> list[dict]:
     try:
         rows = cloud_rpc(settings, "mobile_handover_feed", {"p_session_token": token})
     except Exception as exc:
-        show_supabase_diagnostic("Unable to load handover. Please run the handover Supabase migration. / 无法读取交班，请先执行 handover migration。", exc)
+        if is_missing_rpc_error(exc, "mobile_handover_feed"):
+            message = "Handover feed database function was not found. Please rerun the handover Supabase migration. / 找不到交班读取数据库函数，请重新执行 handover migration。"
+        else:
+            message = "Unable to load handover from Supabase. The migration may already be installed; check the Supabase error below. / 无法从 Supabase 读取交班内容，migration 可能已经安装，请查看下方 Supabase 错误。"
+        show_supabase_diagnostic(message, exc)
         return []
     if not isinstance(rows, list):
         return []
@@ -1943,7 +1982,7 @@ def render_handover_login(settings: MobileCloudSettings, allow_guest: bool = Tru
         "/ 超级密码登录时，员工ID可留空；如果必须输入ID，员工ID和密码填同一个超级密码。"
     )
     with st.form("mobile_employee_login_form"):
-        username = st.text_input("Employee ID / 员工ID", placeholder="Alan / Zhiwei / 526065")
+        username = st.text_input("Employee ID / 员工ID", placeholder="Enter user name / 输入用户名")
         password = st.text_input("Password / 密码", type="password")
         login = st.form_submit_button("Sign in / 登录", type="primary")
     if login:
@@ -1958,7 +1997,11 @@ def render_handover_login(settings: MobileCloudSettings, allow_guest: bool = Tru
                 },
             )
         except Exception as exc:
-            show_supabase_diagnostic("Employee login is not ready. Please run the handover Supabase migration. / 员工登录尚未启用，请先执行 handover migration。", exc)
+            if is_missing_rpc_error(exc, "mobile_employee_login"):
+                message = "Employee login database function was not found. Please rerun the handover Supabase migration. / 找不到员工登录数据库函数，请重新执行 handover migration。"
+            else:
+                message = "Employee login failed in Supabase. The migration may already be installed; check the Supabase error below. / 员工登录数据库调用失败，migration 可能已经安装，请查看下方 Supabase 错误。"
+            show_supabase_diagnostic(message, exc)
             return
         if not rpc_ok(payload):
             st.error("Invalid employee ID or password. / 员工ID或密码不正确。")

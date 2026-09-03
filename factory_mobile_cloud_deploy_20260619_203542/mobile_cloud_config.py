@@ -4,11 +4,21 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(*_args, **_kwargs) -> bool:
+        return False
+
 from supabase import Client, create_client
 
-from environment import env_file_for_current_env
+BASE_DIR = Path(__file__).resolve().parent
 
+try:
+    from environment import env_file_for_current_env
+except ModuleNotFoundError:
+    def env_file_for_current_env() -> Path:
+        return BASE_DIR / ".env"
 
 ENV_FILE = env_file_for_current_env()
 

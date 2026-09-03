@@ -1938,9 +1938,12 @@ def render_handover_login(settings: MobileCloudSettings, allow_guest: bool = Tru
         f"Sign in once on this phone. The login is valid for {HANDOVER_AUTH_SESSION_HOURS} hours. "
         f"/ 本手机登录一次，{HANDOVER_AUTH_SESSION_HOURS}小时内不用重复登录。"
     )
-    st.caption("For super access, leave Employee ID blank and enter the super password. / 超级密码登录时，员工ID留空。")
+    st.caption(
+        "For super access, leave Employee ID blank, or use the same super password as both Employee ID and Password. "
+        "/ 超级密码登录时，员工ID可留空；如果必须输入ID，员工ID和密码填同一个超级密码。"
+    )
     with st.form("mobile_employee_login_form"):
-        username = st.text_input("Employee ID / 员工ID", placeholder="Alan / Zhiwei")
+        username = st.text_input("Employee ID / 员工ID", placeholder="Alan / Zhiwei / 526065")
         password = st.text_input("Password / 密码", type="password")
         login = st.form_submit_button("Sign in / 登录", type="primary")
     if login:

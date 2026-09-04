@@ -2187,7 +2187,7 @@ def handover_auth_gate(
         unsafe_allow_html=True,
     )
     if is_guest:
-        st.info("Guest read-only mode. Handover confirm, draft, and publish are disabled. / 游客只读：不能确认、保存或发布交班。")
+        st.info("Guest read-only mode. Handover confirm and draft save are disabled. / 游客只读：不能确认或保存交班草稿。")
         return session
     if session.get("must_change_password") or st.session_state.get("handover_pending_reset"):
         render_handover_password_reset(settings, session)
@@ -2276,24 +2276,15 @@ def render_handover_editor(settings: MobileCloudSettings, session: dict, machine
                     index=HANDOVER_PRIORITY_OPTIONS.index(priority_label(existing.get("priority"))),
                     key=f"cloud_handover_priority_{machine_id}",
                 )
-            save_draft = st.form_submit_button("Save draft / 保存草稿")
-            publish = st.form_submit_button("Publish handover / 发布交班", type="primary")
-    if not (save_draft or publish):
+            save_draft = st.form_submit_button("Save draft / 保存草稿", type="primary")
+    if not save_draft:
         return
     entries = handover_payload_from_form(general, general_priority, machine_notes, priorities)
-    if save_draft:
-        payload = cloud_rpc(settings, "mobile_handover_save_draft", {"p_session_token": token, "p_entries": entries})
-        if rpc_ok(payload):
-            st.success("Draft saved. It remains private until publish or shift-end auto publish. / 草稿已保存，发布或班次结束前不会公开。")
-        else:
-            st.error("Unable to save draft. / 草稿保存失败。")
-        return
-    payload = cloud_rpc(settings, "mobile_handover_publish", {"p_session_token": token, "p_entries": entries})
+    payload = cloud_rpc(settings, "mobile_handover_save_draft", {"p_session_token": token, "p_entries": entries})
     if rpc_ok(payload):
-        st.success("Handover published. / 交班已发布。")
-        st.rerun()
+        st.success("Draft saved. It will auto-publish at shift end. / 草稿已保存，会在班次结束时自动发布。")
     else:
-        st.error("Please enter at least one handover note before publishing. / 发布前请至少填写一条交班内容。")
+        st.error("Unable to save draft. / 草稿保存失败。")
 
 
 def handover_page(settings: MobileCloudSettings) -> None:

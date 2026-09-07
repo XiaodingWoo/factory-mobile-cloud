@@ -84,6 +84,8 @@ HANDOVER_SESSION_STORAGE_KEY = "factory_mis_employee_session"
 HANDOVER_AUTH_SESSION_HOURS = 8
 HANDOVER_VISIBLE_SHIFT_COUNT = 2
 HANDOVER_PRIORITY_OPTIONS = ["NORMAL", "ATTENTION", "URGENT"]
+HANDOVER_TIMEZONE = ZoneInfo("Australia/Perth")
+HANDOVER_SHIFT_NAMES_BY_START_HOUR = {6: "Day", 14: "Afternoon", 22: "Night"}
 
 
 class SupabaseMachineSchemaError(RuntimeError):
@@ -2006,6 +2008,34 @@ def priority_badge(priority: object) -> str:
     return f'<span class="priority-badge priority-{value.lower()}">{escape(value)}</span>'
 
 
+def handover_current_shift_start(now: datetime | None = None) -> datetime:
+    local_now = (now or datetime.now(timezone.utc)).astimezone(HANDOVER_TIMEZONE)
+    local_date = local_now.date()
+    if 6 <= local_now.hour < 14:
+        start_hour = 6
+    elif 14 <= local_now.hour < 22:
+        start_hour = 14
+    elif local_now.hour >= 22:
+        start_hour = 22
+    else:
+        local_date = local_date - timedelta(days=1)
+        start_hour = 22
+    return datetime.combine(local_date, datetime.min.time(), tzinfo=HANDOVER_TIMEZONE).replace(hour=start_hour)
+
+
+def handover_previous_production_shift_keys(count: int = HANDOVER_VISIBLE_SHIFT_COUNT) -> list[str]:
+    visible_keys: list[str] = []
+    candidate = handover_current_shift_start() - timedelta(hours=8)
+    attempts = 0
+    while len(visible_keys) < count and attempts < 80:
+        attempts += 1
+        shift_name = HANDOVER_SHIFT_NAMES_BY_START_HOUR.get(candidate.hour)
+        if shift_name and candidate.isoweekday() <= 5:
+            visible_keys.append(f"{candidate:%Y%m%d_%H%M}_{shift_name.lower()}")
+        candidate -= timedelta(hours=8)
+    return visible_keys
+
+
 def handover_entries(settings: MobileCloudSettings, token: str) -> list[dict]:
     try:
         rows = cloud_rpc(settings, "mobile_handover_feed", {"p_session_token": token})
@@ -2018,15 +2048,16 @@ def handover_entries(settings: MobileCloudSettings, token: str) -> list[dict]:
         return []
     if not isinstance(rows, list):
         return []
-    shift_keys: list[str] = []
-    filtered: list[dict] = []
+    visible_shift_keys = handover_previous_production_shift_keys()
+    if not visible_shift_keys:
+        return []
+    visible_shift_key_set = set(visible_shift_keys)
+    filtered = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         shift_key = str(row.get("shift_key") or "")
-        if shift_key and shift_key not in shift_keys:
-            shift_keys.append(shift_key)
-        if shift_key in shift_keys[:HANDOVER_VISIBLE_SHIFT_COUNT]:
+        if shift_key in visible_shift_key_set:
             filtered.append(row)
     return filtered
 
@@ -2041,7 +2072,7 @@ def handover_draft(settings: MobileCloudSettings, token: str) -> list[dict]:
 
 
 def render_handover_board(rows: list[dict], machine_ids: list[str]) -> None:
-    st.caption("Showing handover from the last two shifts only. / 只显示最近两个班次的交班内容。")
+    st.caption("Showing handover from the previous two production shifts only. / 只显示前两个生产班次的交班内容。")
     grouped: dict[str, list[dict]] = {"general": []}
     for machine_id in machine_ids:
         grouped[f"machine::{machine_id}"] = []

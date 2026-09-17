@@ -1572,7 +1572,7 @@ def inject_css() -> None:
             background: #f8fafc !important;
             border-left: 5px solid #2563eb !important;
             border-radius: 12px;
-            color: #172033 !important;
+            color: currentColor !important;
             font-size: 1rem;
             font-weight: 750;
             line-height: 1.45;
@@ -1580,7 +1580,7 @@ def inject_css() -> None:
             padding: 12px 12px 10px;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
-            -webkit-text-fill-color: #172033 !important;
+            -webkit-text-fill-color: currentColor !important;
         }
         .handover-entry-meta {
             color: #64748b !important;
@@ -2121,12 +2121,12 @@ def render_handover_board(rows: list[dict], machine_ids: list[str]) -> None:
         if not section_rows:
             body.append('<div class="handover-empty">No handover yet / 暂无交班内容</div>')
         for index, row in enumerate(section_rows, start=1):
-            message = escape(str(row.get("message") or ""))
+            message = escape(str(row.get("message") or "")).replace("\n", "<br>")
             submitted_by = escape(str(row.get("submitted_by_display_name") or row.get("submitted_by_username") or "-"))
             submitted_at = escape(format_local_datetime(row.get("published_at")))
             color = handover_text_color(row.get("text_color"))
             body.append(
-                '<div class="handover-entry">'
+                f'<div class="handover-entry" style="color: {color} !important; -webkit-text-fill-color: {color} !important;">'
                 f'<div>{index}. {priority_badge(row.get("priority"))}'
                 f'<span class="handover-message" style="color: {color} !important; -webkit-text-fill-color: {color} !important;">{message}</span></div>'
                 f'<div class="handover-entry-meta">submit by {submitted_by} | {submitted_at}</div>'

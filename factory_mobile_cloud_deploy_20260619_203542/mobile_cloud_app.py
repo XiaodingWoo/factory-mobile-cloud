@@ -86,6 +86,12 @@ HANDOVER_VISIBLE_SHIFT_COUNT = 2
 HANDOVER_PRIORITY_OPTIONS = ["NORMAL", "ATTENTION", "URGENT"]
 HANDOVER_TIMEZONE = ZoneInfo("Australia/Perth")
 HANDOVER_SHIFT_NAMES_BY_START_HOUR = {6: "Day", 14: "Afternoon", 22: "Night"}
+HANDOVER_TEXT_COLORS = {
+    "black": "#172033",
+    "red": "#dc2626",
+    "orange": "#f97316",
+    "blue": "#2563eb",
+}
 
 
 class SupabaseMachineSchemaError(RuntimeError):
@@ -2008,6 +2014,31 @@ def priority_badge(priority: object) -> str:
     return f'<span class="priority-badge priority-{value.lower()}">{escape(value)}</span>'
 
 
+def handover_text_color(value: object) -> str:
+    key = str(value or "black").strip().lower()
+    return HANDOVER_TEXT_COLORS.get(key, HANDOVER_TEXT_COLORS["black"])
+
+
+def parse_handover_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def control_handover_is_visible(row: dict) -> bool:
+    source = str(row.get("source") or "").strip().lower()
+    if source != "control_center":
+        return False
+    visible_until = parse_handover_datetime(row.get("visible_until"))
+    return visible_until is None or visible_until > datetime.now(timezone.utc)
+
+
 def handover_current_shift_start(now: datetime | None = None) -> datetime:
     local_now = (now or datetime.now(timezone.utc)).astimezone(HANDOVER_TIMEZONE)
     local_date = local_now.date()
@@ -2056,6 +2087,9 @@ def handover_entries(settings: MobileCloudSettings, token: str) -> list[dict]:
     for row in rows:
         if not isinstance(row, dict):
             continue
+        if control_handover_is_visible(row):
+            filtered.append(row)
+            continue
         shift_key = str(row.get("shift_key") or "")
         if shift_key in visible_shift_key_set:
             filtered.append(row)
@@ -2090,9 +2124,11 @@ def render_handover_board(rows: list[dict], machine_ids: list[str]) -> None:
             message = escape(str(row.get("message") or ""))
             submitted_by = escape(str(row.get("submitted_by_display_name") or row.get("submitted_by_username") or "-"))
             submitted_at = escape(format_local_datetime(row.get("published_at")))
+            color = handover_text_color(row.get("text_color"))
             body.append(
                 '<div class="handover-entry">'
-                f'<div>{index}. {priority_badge(row.get("priority"))}{message}</div>'
+                f'<div>{index}. {priority_badge(row.get("priority"))}'
+                f'<span class="handover-message" style="color: {color} !important; -webkit-text-fill-color: {color} !important;">{message}</span></div>'
                 f'<div class="handover-entry-meta">submit by {submitted_by} | {submitted_at}</div>'
                 '</div>'
             )

@@ -2004,14 +2004,8 @@ def rpc_ok(payload: object) -> bool:
 
 def handover_current_session(settings: MobileCloudSettings) -> dict | None:
     if st.session_state.get("handover_guest"):
-        return {
-            "ok": True,
-            "user_id": "guest",
-            "username": "GUEST",
-            "display_name": "Guest / 游客",
-            "role": "guest",
-            "handover_acknowledged": True,
-        }
+        clear_handover_login_state(clear_browser=True)
+        return None
     token = current_handover_token()
     if not token:
         return None
@@ -2172,13 +2166,14 @@ def render_handover_board(rows: list[dict], machine_ids: list[str]) -> None:
         section(f"Machine {machine_id} / 机器 {machine_id}", grouped.get(f"machine::{machine_id}", []))
 
 
-def render_handover_login(settings: MobileCloudSettings, allow_guest: bool = True) -> None:
+def render_handover_login(settings: MobileCloudSettings) -> None:
     handover_sync_browser_session()
     st.title("Employee Login / 员工登录")
     st.caption(
         f"Sign in once on this phone. The login is valid for {HANDOVER_AUTH_SESSION_HOURS} hours. "
         f"/ 本手机登录一次，{HANDOVER_AUTH_SESSION_HOURS}小时内不用重复登录。"
     )
+    st.caption("Cloud access requires an employee login. / 云端访问必须使用员工账号密码。")
     st.caption(
         "For super access, leave Employee ID blank, or use the same super password as both Employee ID and Password. "
         "/ 超级密码登录时，员工ID可留空；如果必须输入ID，员工ID和密码填同一个超级密码。"
@@ -2212,24 +2207,13 @@ def render_handover_login(settings: MobileCloudSettings, allow_guest: bool = Tru
         token = str(payload.get("session_token") or "")
         st.session_state["handover_session_token"] = token
         st.session_state["handover_user"] = payload
-        st.session_state["handover_guest"] = False
+        st.session_state.pop("handover_guest", None)
         if payload.get("must_change_password"):
             st.session_state["handover_pending_reset"] = True
         handover_set_query_token(token)
         st.success("Signed in. Loading... / 已登录，正在进入系统...")
         handover_sync_browser_session(token=token, reload_after_save=True)
         st.stop()
-
-    if allow_guest and st.button("Continue as Guest / 游客只读查看", use_container_width=True):
-        st.session_state["handover_guest"] = True
-        st.session_state["handover_user"] = {
-            "user_id": "guest",
-            "username": "GUEST",
-            "display_name": "Guest / 游客",
-            "role": "guest",
-            "handover_acknowledged": True,
-        }
-        st.rerun()
 
 
 def render_handover_password_reset(settings: MobileCloudSettings, session: dict) -> None:
@@ -2267,7 +2251,6 @@ def handover_auth_gate(
     settings: MobileCloudSettings,
     machine_ids: list[str],
     require_ack: bool = True,
-    allow_guest: bool = True,
 ) -> dict | None:
     try:
         session = handover_current_session(settings)
@@ -2275,20 +2258,12 @@ def handover_auth_gate(
         show_supabase_diagnostic("Employee session check failed. / 员工登录状态检查失败。", exc)
         return None
     if not session:
-        render_handover_login(settings, allow_guest=allow_guest)
-        return None
-    is_guest = bool(st.session_state.get("handover_guest"))
-    if is_guest and not allow_guest:
-        clear_handover_login_state(clear_browser=False)
-        render_handover_login(settings, allow_guest=False)
+        render_handover_login(settings)
         return None
     st.markdown(
         f'<div class="handover-user-strip">Signed in as: {escape(str(session.get("display_name") or session.get("username") or "-"))}</div>',
         unsafe_allow_html=True,
     )
-    if is_guest:
-        st.info("Guest read-only mode. Handover confirm and draft save are disabled. / 游客只读：不能确认或保存交班草稿。")
-        return session
     if session.get("must_change_password") or st.session_state.get("handover_pending_reset"):
         render_handover_password_reset(settings, session)
         return None
@@ -2404,9 +2379,6 @@ def handover_page(settings: MobileCloudSettings) -> None:
         f'<a class="machine-button" href="{escape(back_url)}">Back to machine status / 返回机器状态</a>',
         unsafe_allow_html=True,
     )
-    if st.session_state.get("handover_guest"):
-        st.info("Guest can view machine status only. / 游客只能查看机器状态。")
-        return
     token = str(session.get("session_token") or current_handover_token())
     render_handover_board(handover_entries(settings, token), machine_ids)
     render_handover_editor(settings, session, machine_ids)
@@ -3198,7 +3170,7 @@ def _stock_step_confirm(settings: MobileCloudSettings, selectable_items: list[di
 
 def stock_in_request_page(settings: MobileCloudSettings) -> None:
     st.title(t("stock.title"))
-    session = handover_auth_gate(settings, [], require_ack=False, allow_guest=False)
+    session = handover_auth_gate(settings, [], require_ack=False)
     if not session:
         return
     if not st.session_state.get("stock_last_operator"):

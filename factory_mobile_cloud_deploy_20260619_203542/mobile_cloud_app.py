@@ -92,6 +92,10 @@ HANDOVER_TEXT_COLORS = {
     "orange": "#f97316",
     "blue": "#2563eb",
 }
+HANDOVER_PRIORITY_TEXT_COLOR = {
+    "ATTENTION": "orange",
+    "URGENT": "red",
+}
 
 
 class SupabaseMachineSchemaError(RuntimeError):
@@ -1572,7 +1576,7 @@ def inject_css() -> None:
             background: #f8fafc !important;
             border-left: 5px solid #2563eb !important;
             border-radius: 12px;
-            color: currentColor !important;
+            color: #172033 !important;
             font-size: 1rem;
             font-weight: 750;
             line-height: 1.45;
@@ -1580,7 +1584,27 @@ def inject_css() -> None:
             padding: 12px 12px 10px;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
-            -webkit-text-fill-color: currentColor !important;
+            -webkit-text-fill-color: #172033 !important;
+        }
+        .handover-message {
+            color: inherit !important;
+            -webkit-text-fill-color: inherit !important;
+        }
+        .handover-message-color-black {
+            color: #172033 !important;
+            -webkit-text-fill-color: #172033 !important;
+        }
+        .handover-message-color-red {
+            color: #dc2626 !important;
+            -webkit-text-fill-color: #dc2626 !important;
+        }
+        .handover-message-color-orange {
+            color: #f97316 !important;
+            -webkit-text-fill-color: #f97316 !important;
+        }
+        .handover-message-color-blue {
+            color: #2563eb !important;
+            -webkit-text-fill-color: #2563eb !important;
         }
         .handover-entry-meta {
             color: #64748b !important;
@@ -2014,8 +2038,15 @@ def priority_badge(priority: object) -> str:
     return f'<span class="priority-badge priority-{value.lower()}">{escape(value)}</span>'
 
 
-def handover_text_color(value: object) -> str:
-    key = str(value or "black").strip().lower()
+def handover_color_key(value: object, priority: object = None) -> str:
+    key = str(value or "").strip().lower()
+    if not key or key == "black":
+        key = HANDOVER_PRIORITY_TEXT_COLOR.get(priority_label(priority), key or "black")
+    return key if key in HANDOVER_TEXT_COLORS else "black"
+
+
+def handover_text_color(value: object, priority: object = None) -> str:
+    key = handover_color_key(value, priority)
     return HANDOVER_TEXT_COLORS.get(key, HANDOVER_TEXT_COLORS["black"])
 
 
@@ -2124,11 +2155,13 @@ def render_handover_board(rows: list[dict], machine_ids: list[str]) -> None:
             message = escape(str(row.get("message") or "")).replace("\n", "<br>")
             submitted_by = escape(str(row.get("submitted_by_display_name") or row.get("submitted_by_username") or "-"))
             submitted_at = escape(format_local_datetime(row.get("published_at")))
-            color = handover_text_color(row.get("text_color"))
+            color_key = handover_color_key(row.get("text_color"), row.get("priority"))
+            color = handover_text_color(color_key, row.get("priority"))
             body.append(
-                f'<div class="handover-entry" style="color: {color} !important; -webkit-text-fill-color: {color} !important;">'
+                '<div class="handover-entry">'
                 f'<div>{index}. {priority_badge(row.get("priority"))}'
-                f'<span class="handover-message" style="color: {color} !important; -webkit-text-fill-color: {color} !important;">{message}</span></div>'
+                f'<span class="handover-message handover-message-color-{escape(color_key)}" '
+                f'style="color: {color} !important; -webkit-text-fill-color: {color} !important;">{message}</span></div>'
                 f'<div class="handover-entry-meta">submit by {submitted_by} | {submitted_at}</div>'
                 '</div>'
             )
